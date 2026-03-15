@@ -1,0 +1,22 @@
+{
+  "Plugins": [
+    {
+      "Info": {
+        "Types": {
+          "HdShiroRendererPlugin": {
+            "bases": [
+              "HdRendererPlugin"
+            ],
+            "displayName": "Shiro",
+            "priority": 0
+          }
+        }
+      },
+      "LibraryPath": "../../hdShiro",
+      "Name": "hdShiro",
+      "ResourcePath": ".",
+      "Root": ".",
+      "Type": "library"
+    }
+  ]
+}

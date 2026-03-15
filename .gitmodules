@@ -1,0 +1,6 @@
+[submodule "external/openqmc"]
+	path = external/openqmc
+	url = https://github.com/AcademySoftwareFoundation/openqmc.git
+[submodule "external/vcpkg"]
+	path = external/vcpkg
+	url = https://github.com/microsoft/vcpkg.git
