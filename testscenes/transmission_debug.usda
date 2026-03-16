@@ -1,0 +1,106 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    renderSettingsPrimPath = </Render/ShiroTransmissionDebug>
+)
+
+def Xform "World"
+{
+    def Camera "RenderCamera"
+    {
+        float focalLength = 35
+        float horizontalAperture = 20.955
+        float verticalAperture = 11.3288
+        double3 xformOp:translate = (0, 0.35, 8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "Looks"
+    {
+        def Material "Glass"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/Glass/standard.outputs:out>
+
+            def Shader "standard"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:base = 0
+                float inputs:specular = 1
+                float inputs:specular_IOR = 1.5
+                float inputs:specular_roughness = 0.01
+                float inputs:transmission = 1
+                color3f inputs:transmission_color = (1, 1, 1)
+                float inputs:transmission_depth = 1
+                bool inputs:thin_walled = false
+                token outputs:out
+            }
+        }
+    }
+
+    def Sphere "GlassBall" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/Glass>
+        double radius = 1.5
+        uniform token[] xformOpOrder = []
+    }
+
+    def Mesh "Ground"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-6, -1.5, -3), (6, -1.5, -3), (6, -1.5, 3), (-6, -1.5, 3)]
+        color3f[] primvars:displayColor = [(0.35, 0.36, 0.38)] (
+            interpolation = "constant"
+        )
+    }
+
+    def Mesh "BackdropLeft"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-6, -2, -6), (0, -2, -6), (0, 3, -6), (-6, 3, -6)]
+        color3f[] primvars:displayColor = [(0.18, 0.34, 0.82)] (
+            interpolation = "constant"
+        )
+    }
+
+    def Mesh "BackdropRight"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0, -2, -6), (6, -2, -6), (6, 3, -6), (0, 3, -6)]
+        color3f[] primvars:displayColor = [(0.88, 0.42, 0.16)] (
+            interpolation = "constant"
+        )
+    }
+
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 0.2
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "ShiroTransmissionDebug"
+    {
+        rel camera = </World/RenderCamera>
+        int2 resolution = (960, 540)
+        bool disableMotionBlur = true
+        token[] includedPurposes = ["default", "render"]
+
+        int shiro:backend = 2
+        int shiro:samplesPerPixel = 256
+        int shiro:samplesPerUpdate = 8
+        int shiro:domeLightSamples = 1
+        int shiro:maxDepth = 8
+        int shiro:diffuseDepth = 4
+        int shiro:specularDepth = 6
+        bool shiro:backgroundVisible = true
+        bool shiro:headlightEnabled = false
+    }
+}

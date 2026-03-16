@@ -107,7 +107,9 @@ bool HdShiroRenderBuffer::IsConverged() const {
 void HdShiroRenderBuffer::WriteAov(const TfToken& aovName, const shiro::render::FrameBuffer& frame) {
     std::scoped_lock lock(mutex_);
 
-    const size_t pixelCount = static_cast<size_t>(frame.Width()) * static_cast<size_t>(frame.Height());
+    const size_t framePixelCount = static_cast<size_t>(frame.Width()) * static_cast<size_t>(frame.Height());
+    const size_t bufferPixelCount = static_cast<size_t>(GetWidth()) * static_cast<size_t>(GetHeight());
+    const size_t pixelCount = std::min(framePixelCount, bufferPixelCount);
     if (pixelCount == 0 || storage_.empty()) {
         return;
     }

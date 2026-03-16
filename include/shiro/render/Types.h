@@ -53,6 +53,14 @@ inline Vec4f operator+(const Vec4f& lhs, const Vec4f& rhs) {
     return {lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z, lhs.w + rhs.w};
 }
 
+inline Vec4f operator*(const Vec4f& lhs, float rhs) {
+    return {lhs.x * rhs, lhs.y * rhs, lhs.z * rhs, lhs.w * rhs};
+}
+
+inline Vec4f operator*(float lhs, const Vec4f& rhs) {
+    return rhs * lhs;
+}
+
 inline Vec4f operator/(const Vec4f& lhs, float rhs) {
     return {lhs.x / rhs, lhs.y / rhs, lhs.z / rhs, lhs.w / rhs};
 }

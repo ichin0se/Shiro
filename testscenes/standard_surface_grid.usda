@@ -1,0 +1,209 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    renderSettingsPrimPath = </Render/ShiroStandardSurface>
+)
+
+def Xform "World"
+{
+    def Camera "RenderCamera"
+    {
+        float focalLength = 55
+        float horizontalAperture = 20.955
+        float verticalAperture = 11.3288
+        double3 xformOp:translate = (0, 1.5, 10)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "Looks"
+    {
+        def Material "MatteSubsurface"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/MatteSubsurface/standard.outputs:out>
+
+            def Shader "standard"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:base = 1
+                color3f inputs:base_color = (0.8, 0.35, 0.28)
+                float inputs:diffuse_roughness = 0.55
+                float inputs:specular = 0.15
+                float inputs:specular_roughness = 0.5
+                float inputs:subsurface = 0.7
+                color3f inputs:subsurface_color = (0.95, 0.55, 0.42)
+                color3f inputs:subsurface_radius = (1.2, 0.8, 0.45)
+                float inputs:subsurface_scale = 0.8
+                token outputs:out
+            }
+        }
+
+        def Material "Metal"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/Metal/standard.outputs:out>
+
+            def Shader "standard"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:base = 1
+                color3f inputs:base_color = (0.92, 0.7, 0.28)
+                float inputs:metalness = 1
+                float inputs:specular = 1
+                float inputs:specular_roughness = 0.08
+                float inputs:coat = 0.15
+                float inputs:coat_IOR = 1.6
+                float inputs:coat_roughness = 0.03
+                token outputs:out
+            }
+        }
+
+        def Material "CoatedSheen"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/CoatedSheen/standard.outputs:out>
+
+            def Shader "standard"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:base = 1
+                color3f inputs:base_color = (0.18, 0.26, 0.62)
+                float inputs:specular = 0.45
+                float inputs:specular_roughness = 0.28
+                float inputs:coat = 0.85
+                color3f inputs:coat_color = (1, 1, 1)
+                float inputs:coat_IOR = 1.5
+                float inputs:coat_roughness = 0.06
+                float inputs:sheen = 0.5
+                color3f inputs:sheen_color = (0.65, 0.8, 1)
+                float inputs:sheen_roughness = 0.25
+                token outputs:out
+            }
+        }
+
+        def Material "ThinGlass"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/ThinGlass/standard.outputs:out>
+
+            def Shader "standard"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:base = 0.05
+                color3f inputs:base_color = (0.9, 0.95, 1)
+                float inputs:specular = 1
+                float inputs:specular_roughness = 0.02
+                float inputs:specular_IOR = 1.52
+                float inputs:transmission = 0.95
+                color3f inputs:transmission_color = (0.88, 0.96, 1)
+                float inputs:transmission_depth = 0.8
+                color3f inputs:transmission_scatter = (0.08, 0.03, 0.01)
+                bool inputs:thin_walled = true
+                token outputs:out
+            }
+        }
+
+        def Material "CoatedPlastic"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/CoatedPlastic/standard.outputs:out>
+
+            def Shader "standard"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:base = 1
+                color3f inputs:base_color = (0.2, 0.72, 0.48)
+                float inputs:specular = 0.6
+                float inputs:specular_roughness = 0.32
+                float inputs:coat = 1
+                float inputs:coat_IOR = 1.58
+                float inputs:coat_roughness = 0.015
+                float inputs:opacity = 0.85
+                token outputs:out
+            }
+        }
+    }
+
+    def Sphere "BallA" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/MatteSubsurface>
+        double radius = 1
+        double3 xformOp:translate = (-4.5, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "BallB" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/Metal>
+        double radius = 1
+        double3 xformOp:translate = (-2.25, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "BallC" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/CoatedSheen>
+        double radius = 1
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "BallD" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/ThinGlass>
+        double radius = 1
+        double3 xformOp:translate = (2.25, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "BallE" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/CoatedPlastic>
+        double radius = 1
+        double3 xformOp:translate = (4.5, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Ground"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-10, 0, -8), (10, 0, -8), (10, 0, 8), (-10, 0, 8)]
+        color3f[] primvars:displayColor = [(0.68, 0.7, 0.74)] (
+            interpolation = "constant"
+        )
+    }
+
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.25
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "ShiroStandardSurface"
+    {
+        rel camera = </World/RenderCamera>
+        int2 resolution = (1280, 720)
+        bool disableMotionBlur = true
+        token[] includedPurposes = ["default", "render"]
+
+        int shiro:backend = 2
+        int shiro:samplesPerPixel = 256
+        int shiro:samplesPerUpdate = 8
+        int shiro:domeLightSamples = 4
+        int shiro:maxDepth = 8
+        int shiro:diffuseDepth = 4
+        int shiro:specularDepth = 4
+        bool shiro:backgroundVisible = true
+        bool shiro:headlightEnabled = false
+    }
+}

@@ -10,22 +10,36 @@ Shiro is split around the same fault lines that matter in a production renderer:
 
 ## Modules
 
-- `include/shiro/render` and `src/render`
-  - Core renderer state, frame buffers, transport loop, scene format, and sampling.
+- `include/shiro/render`, `src/render`, and `src/runtime`
+  - renderer facade, frame buffers, environment maps, sampling helpers, and backend-independent runtime types
+- `include/shiro/backend` and `src/backend`
+  - execution backends and scheduling boundaries
+  - `cpu/` holds the Embree-backed reference path tracer
+  - `optix/` holds the CUDA/OptiX GPU path
 - `include/shiro/hydra` and `src/hydra`
-  - Hydra plugin boundary, render delegate, render pass, render buffers, and scene translation.
+  - Hydra plugin boundary, render delegate, render pass, render buffers, and scene translation
+- `src/frontend`
+  - frontend-specific build packaging for `hdShiro`
+- `tools`
+  - standalone validation utilities such as `shiro_optix_probe`
 - `plugins/hdShiro`
-  - USD plug metadata.
+  - USD plug metadata
 - `docs`
-  - Research notes, dependency choices, and staged roadmap.
+  - research notes, dependency choices, and staged roadmap
 
 ## Current execution model
 
-The first implementation uses a CPU path tracer as the reference backend. The `Renderer` class already exposes a backend mode so the following upgrades can slot in without changing the Hydra layer:
+The first implementation uses a CPU path tracer as the reference backend. `Renderer` is now a thin facade that dispatches into backend modules so the following upgrades can slot in without changing the Hydra layer:
 
 - CPU reference backend with wide BVH traversal.
+- CUDA/OptiX backend for triangle traversal, dome-light HDRI sampling, and PBR path tracing.
 - GPU wavefront backend for high-throughput path states.
 - Hybrid/XPU scheduler that routes memory-heavy or divergence-heavy workloads to CPU while keeping coherent primary/secondary queues on GPU.
+
+Current limitation:
+
+- the OptiX backend still lacks a true hybrid scheduler and broader texture/material coverage beyond the currently translated surface parameters
+- CPU/Embree remains the only backend that should be treated as feature-complete for Hydra rendering today
 
 ## Planned transport upgrades
 

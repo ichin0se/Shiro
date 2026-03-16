@@ -4,7 +4,13 @@
 
 #if SHIRO_WITH_USD
 
+#include <limits>
+#include <optional>
+#include <string>
+
 #include <pxr/imaging/hd/mesh.h>
+
+#include "shiro/hydra/SceneBridge.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -20,6 +26,11 @@ public:
 protected:
     void _InitRepr(const TfToken& reprToken, HdDirtyBits* dirtyBits) override;
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits dirtyBits) const override;
+
+private:
+    std::optional<HdShiroMeshPayload> cachedPayload_;
+    std::string cachedMaterialId_;
+    uint32_t cachedMaxSubdivLevel_ = std::numeric_limits<uint32_t>::max();
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

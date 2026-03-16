@@ -19,6 +19,29 @@
         "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/vs2022",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake"
       }
+    },
+    {
+      "name": "linux-houdini20.5",
+      "displayName": "AlmaLinux 9 + Houdini 20.5.410",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-linux-houdini20.5",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/houdini20.5",
+        "SHIRO_HOUDINI_ROOT": "/opt/hfs20.5.410"
+      }
+    },
+    {
+      "name": "linux-houdini20.5-cuda",
+      "displayName": "AlmaLinux 9 + Houdini 20.5.410 + CUDA/OptiX",
+      "inherits": "linux-houdini20.5",
+      "binaryDir": "${sourceDir}/build-linux-houdini20.5-cuda",
+      "cacheVariables": {
+        "SHIRO_CUDA_ROOT": "/usr/local/cuda",
+        "SHIRO_OPTIX_ROOT": "${sourceDir}/external/optix-sdk-9.0.0",
+        "SHIRO_REQUIRE_CUDA": "ON",
+        "SHIRO_REQUIRE_OPTIX": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -33,6 +56,16 @@
       "displayName": "VS2022 Release",
       "configurePreset": "vs2022-x64",
       "configuration": "Release"
+    },
+    {
+      "name": "linux-houdini20.5",
+      "displayName": "AlmaLinux 9 + Houdini 20.5.410",
+      "configurePreset": "linux-houdini20.5"
+    },
+    {
+      "name": "linux-houdini20.5-cuda",
+      "displayName": "AlmaLinux 9 + Houdini 20.5.410 + CUDA/OptiX",
+      "configurePreset": "linux-houdini20.5-cuda"
     }
   ]
 }

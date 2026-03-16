@@ -26,9 +26,14 @@ void HdShiroRendererPlugin::DeleteRenderDelegate(HdRenderDelegate* renderDelegat
     delete renderDelegate;
 }
 
+#if PXR_VERSION >= 2511
 bool HdShiroRendererPlugin::IsSupported(const HdRendererCreateArgs& rendererCreateArgs, std::string* reasonWhyNot) const {
     (void)rendererCreateArgs;
     (void)reasonWhyNot;
+#else
+bool HdShiroRendererPlugin::IsSupported(bool gpuEnabled) const {
+    (void)gpuEnabled;
+#endif
     return true;
 }
 

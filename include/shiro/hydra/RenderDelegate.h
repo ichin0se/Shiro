@@ -39,10 +39,14 @@ public:
     void CommitResources(HdChangeTracker* tracker) override;
     HdAovDescriptor GetDefaultAovDescriptor(const TfToken& name) const override;
     TfTokenVector GetMaterialRenderContexts() const override;
+    HdRenderSettingDescriptorList GetRenderSettingDescriptors() const override;
+    unsigned int GetRenderSettingsVersion() const override;
+    TfTokenVector GetRenderSettingsNamespaces() const override;
     void SetRenderSetting(const TfToken& key, const VtValue& value) override;
     VtValue GetRenderSetting(const TfToken& key) const override;
     bool Pause() override;
     bool Resume() override;
+    bool IsPaused() const override;
     bool IsPauseSupported() const override;
 
 private:

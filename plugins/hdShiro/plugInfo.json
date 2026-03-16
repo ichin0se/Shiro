@@ -12,10 +12,10 @@
           }
         }
       },
-      "LibraryPath": "../../hdShiro",
+      "LibraryPath": "../../usd/@SHIRO_HD_PLUGIN_LIBRARY_NAME@",
       "Name": "hdShiro",
-      "ResourcePath": ".",
-      "Root": ".",
+      "ResourcePath": "resources",
+      "Root": "..",
       "Type": "library"
     }
   ]

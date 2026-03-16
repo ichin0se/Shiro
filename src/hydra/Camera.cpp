@@ -11,9 +11,7 @@ HdShiroCamera::HdShiroCamera(const SdfPath& id)
 }
 
 void HdShiroCamera::Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam, HdDirtyBits* dirtyBits) {
-    (void)sceneDelegate;
-    (void)renderParam;
-    *dirtyBits = HdChangeTracker::Clean;
+    HdCamera::Sync(sceneDelegate, renderParam, dirtyBits);
 }
 
 void HdShiroCamera::Finalize(HdRenderParam* renderParam) {
@@ -21,7 +19,7 @@ void HdShiroCamera::Finalize(HdRenderParam* renderParam) {
 }
 
 HdDirtyBits HdShiroCamera::GetInitialDirtyBitsMask() const {
-    return HdChangeTracker::AllDirty;
+    return HdCamera::AllDirty;
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

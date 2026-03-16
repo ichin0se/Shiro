@@ -2,6 +2,8 @@
 
 #if SHIRO_WITH_USD
 
+#include <algorithm>
+
 #include <pxr/base/gf/vec4d.h>
 #include <pxr/imaging/hd/renderPassState.h>
 
@@ -19,7 +21,7 @@ HdShiroRenderPass::HdShiroRenderPass(
 }
 
 bool HdShiroRenderPass::IsConverged() const {
-    return converged_;
+    return renderParam_ ? renderParam_->IsConverged() : converged_;
 }
 
 void HdShiroRenderPass::_Execute(const HdRenderPassStateSharedPtr& renderPassState, const TfTokenVector& renderTags) {
@@ -29,13 +31,37 @@ void HdShiroRenderPass::_Execute(const HdRenderPassStateSharedPtr& renderPassSta
         return;
     }
 
-    const GfVec4d viewport = renderPassState->GetViewport();
-    renderParam_->SetImageSize(
-        static_cast<uint32_t>(viewport[2]),
-        static_cast<uint32_t>(viewport[3]));
+    uint32_t imageWidth = 0;
+    uint32_t imageHeight = 0;
+    for (const auto& aovBinding : renderPassState->GetAovBindings()) {
+        auto* renderBuffer = static_cast<HdShiroRenderBuffer*>(aovBinding.renderBuffer);
+        if (!renderBuffer) {
+            continue;
+        }
 
-    const shiro::render::Camera camera = HdShiroSceneBridge::BuildCamera(renderPassState);
-    const shiro::render::FrameBuffer frame = renderParam_->Render(camera);
+        imageWidth = std::max(imageWidth, renderBuffer->GetWidth());
+        imageHeight = std::max(imageHeight, renderBuffer->GetHeight());
+    }
+
+    if (imageWidth == 0 || imageHeight == 0) {
+        const GfVec4d viewport = renderPassState->GetViewport();
+        imageWidth = static_cast<uint32_t>(viewport[2]);
+        imageHeight = static_cast<uint32_t>(viewport[3]);
+    }
+
+    if (imageWidth == 0 || imageHeight == 0) {
+        converged_ = true;
+        return;
+    }
+
+    renderParam_->SetImageSize(imageWidth, imageHeight);
+
+    const shiro::render::Camera camera = HdShiroSceneBridge::BuildCamera(renderPassState, imageWidth, imageHeight);
+    renderParam_->RequestRender(camera);
+
+    shiro::render::FrameBuffer frame;
+    bool renderConverged = false;
+    const bool hasFrame = renderParam_->GetLatestFrame(&frame, &renderConverged);
 
     for (const auto& aovBinding : renderPassState->GetAovBindings()) {
         auto* renderBuffer = static_cast<HdShiroRenderBuffer*>(aovBinding.renderBuffer);
@@ -43,11 +69,13 @@ void HdShiroRenderPass::_Execute(const HdRenderPassStateSharedPtr& renderPassSta
             continue;
         }
 
-        renderBuffer->WriteAov(aovBinding.aovName, frame);
-        renderBuffer->SetConverged(true);
+        if (hasFrame) {
+            renderBuffer->WriteAov(aovBinding.aovName, frame);
+        }
+        renderBuffer->SetConverged(renderConverged);
     }
 
-    converged_ = true;
+    converged_ = renderConverged;
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

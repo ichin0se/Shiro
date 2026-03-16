@@ -4,9 +4,9 @@
 
 1. Replace brute-force triangle intersection with Embree BLAS/TLAS on CPU.
 2. Add explicit light sampling and MIS.
-3. Translate USD material networks instead of relying on mesh display primvars.
+3. Expand USD material-network coverage from the current `UsdPreviewSurface` / `standard_surface` / `openpbr_surface` parameter subset to texture-driven graphs.
 4. Add volume and SSS path families.
-5. Introduce OptiX-backed GPU traversal and a hybrid scheduler.
+5. Add a true hybrid scheduler on top of the OptiX backend.
 
 ## Production readiness checklist
 

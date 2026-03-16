@@ -8,8 +8,10 @@
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/instancer.h>
 #include <pxr/imaging/hd/tokens.h>
+#include <pxr/usd/usdShade/tokens.h>
 
 #include "shiro/hydra/Camera.h"
+#include "shiro/hydra/Light.h"
 #include "shiro/hydra/Material.h"
 #include "shiro/hydra/Mesh.h"
 #include "shiro/hydra/RenderBuffer.h"
@@ -27,7 +29,12 @@ const TfTokenVector& SupportedRprimTypes() {
 }
 
 const TfTokenVector& SupportedSprimTypes() {
-    static const TfTokenVector tokens = {HdPrimTypeTokens->camera, HdPrimTypeTokens->material};
+    static const TfTokenVector tokens = {
+        HdPrimTypeTokens->camera,
+        HdPrimTypeTokens->material,
+        HdPrimTypeTokens->domeLight,
+        HdPrimTypeTokens->distantLight,
+    };
     return tokens;
 }
 
@@ -36,7 +43,16 @@ const TfTokenVector& SupportedBprimTypes() {
     return tokens;
 }
 
-TfTokenVector MaterialRenderContexts() {
+const TfTokenVector& MaterialRenderContexts() {
+    static const TfTokenVector tokens = {
+        UsdShadeTokens->universalRenderContext,
+        TfToken("mtlx"),
+        HdShiroTokens->shiro,
+    };
+    return tokens;
+}
+
+const TfTokenVector& RenderSettingsNamespaces() {
     static const TfTokenVector tokens = {HdShiroTokens->shiro};
     return tokens;
 }
@@ -44,12 +60,15 @@ TfTokenVector MaterialRenderContexts() {
 }  // namespace
 
 HdShiroRenderDelegate::HdShiroRenderDelegate()
-    : renderParam_(std::make_unique<HdShiroRenderParam>()),
+    : HdRenderDelegate(),
+      renderParam_(std::make_unique<HdShiroRenderParam>()),
       resourceRegistry_(std::make_shared<HdResourceRegistry>()) {
 }
 
 HdShiroRenderDelegate::HdShiroRenderDelegate(const HdRenderSettingsMap& settingsMap)
-    : HdShiroRenderDelegate() {
+    : HdRenderDelegate(settingsMap),
+      renderParam_(std::make_unique<HdShiroRenderParam>()),
+      resourceRegistry_(std::make_shared<HdResourceRegistry>()) {
     ApplySettingsMap(settingsMap);
 }
 
@@ -102,6 +121,10 @@ HdSprim* HdShiroRenderDelegate::CreateSprim(const TfToken& typeId, const SdfPath
 
     if (typeId == HdPrimTypeTokens->material) {
         return new HdShiroMaterial(sprimId);
+    }
+
+    if (typeId == HdPrimTypeTokens->domeLight || typeId == HdPrimTypeTokens->distantLight) {
+        return new HdShiroLight(sprimId, typeId);
     }
 
     return nullptr;
@@ -159,12 +182,41 @@ TfTokenVector HdShiroRenderDelegate::GetMaterialRenderContexts() const {
     return MaterialRenderContexts();
 }
 
+HdRenderSettingDescriptorList HdShiroRenderDelegate::GetRenderSettingDescriptors() const {
+    return {
+        {"Backend (0=CPU, 1=GPU, 2=Hybrid)", HdShiroTokens->namespacedBackend, VtValue(2)},
+        {"Pixel Samples", HdShiroTokens->namespacedSamplesPerPixel, VtValue(32)},
+        {"Samples Per Update", HdShiroTokens->namespacedSamplesPerUpdate, VtValue(1)},
+        {"Dome Light Samples", HdShiroTokens->namespacedDomeLightSamples, VtValue(1)},
+        {"Max Path Depth", HdShiroTokens->namespacedMaxDepth, VtValue(4)},
+        {"Diffuse Depth", HdShiroTokens->namespacedDiffuseDepth, VtValue(2)},
+        {"Specular Depth", HdShiroTokens->namespacedSpecularDepth, VtValue(2)},
+        {"Background Visible", HdShiroTokens->namespacedBackgroundVisible, VtValue(true)},
+        {"Enable Headlight", HdShiroTokens->namespacedHeadlightEnabled, VtValue(true)},
+        {"Thread Limit", HdShiroTokens->namespacedThreadLimit, VtValue(0)},
+        {"Max Subdivision Level", HdShiroTokens->namespacedMaxSubdivLevel, VtValue(2)},
+    };
+}
+
+unsigned int HdShiroRenderDelegate::GetRenderSettingsVersion() const {
+    return HdRenderDelegate::GetRenderSettingsVersion();
+}
+
+TfTokenVector HdShiroRenderDelegate::GetRenderSettingsNamespaces() const {
+    return RenderSettingsNamespaces();
+}
+
 void HdShiroRenderDelegate::SetRenderSetting(const TfToken& key, const VtValue& value) {
+    HdRenderDelegate::SetRenderSetting(key, value);
     renderParam_->SetRenderSetting(key, value);
 }
 
 VtValue HdShiroRenderDelegate::GetRenderSetting(const TfToken& key) const {
-    return renderParam_->GetRenderSetting(key);
+    const VtValue value = renderParam_->GetRenderSetting(key);
+    if (!value.IsEmpty()) {
+        return value;
+    }
+    return HdRenderDelegate::GetRenderSetting(key);
 }
 
 bool HdShiroRenderDelegate::Pause() {
@@ -177,13 +229,17 @@ bool HdShiroRenderDelegate::Resume() {
     return true;
 }
 
+bool HdShiroRenderDelegate::IsPaused() const {
+    return renderParam_->IsPaused();
+}
+
 bool HdShiroRenderDelegate::IsPauseSupported() const {
     return true;
 }
 
 void HdShiroRenderDelegate::ApplySettingsMap(const HdRenderSettingsMap& settingsMap) {
     for (const auto& [key, value] : settingsMap) {
-        renderParam_->SetRenderSetting(key, value);
+        SetRenderSetting(key, value);
     }
 }
 

@@ -13,7 +13,11 @@ public:
     HdRenderDelegate* CreateRenderDelegate() override;
     HdRenderDelegate* CreateRenderDelegate(const HdRenderSettingsMap& settingsMap) override;
     void DeleteRenderDelegate(HdRenderDelegate* renderDelegate) override;
+#if PXR_VERSION >= 2511
     bool IsSupported(const HdRendererCreateArgs& rendererCreateArgs, std::string* reasonWhyNot = nullptr) const override;
+#else
+    bool IsSupported(bool gpuEnabled = true) const override;
+#endif
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

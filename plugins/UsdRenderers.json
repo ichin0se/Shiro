@@ -1,0 +1,21 @@
+{
+  "HdShiroRendererPlugin": {
+    "valid": true,
+    "menulabel": "Shiro",
+    "menupriority": 20,
+    "allowbackgroundupdate": false,
+    "depthstyle": "linear",
+    "defaultpurposes": [
+      "render"
+    ],
+    "restartrendersettings": [
+      "shiro:*"
+    ],
+    "restartcamerasettings": [
+      "shutter:open",
+      "shutter:close"
+    ],
+    "aovsupport": true,
+    "viewportrenderer": true
+  }
+}

@@ -6,6 +6,7 @@
 #include "shiro/hydra/SceneBridge.h"
 
 #include <pxr/imaging/hd/changeTracker.h>
+#include <pxr/imaging/hd/sceneDelegate.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -26,8 +27,48 @@ void HdShiroMesh::Sync(
         return;
     }
 
-    if (const auto payload = HdShiroSceneBridge::ExtractMesh(sceneDelegate, GetId())) {
-        shiroRenderParam->UpsertMesh(GetId().GetString(), payload->mesh, payload->material);
+    const HdDirtyBits bits = *dirtyBits;
+    const bool visibilityDirty = (bits & HdChangeTracker::DirtyVisibility) != 0;
+    const bool meshDirty =
+        visibilityDirty
+        || (bits & HdChangeTracker::DirtyDisplayStyle) != 0
+        || (bits & HdChangeTracker::DirtyPoints) != 0
+        || (bits & HdChangeTracker::DirtyTopology) != 0
+        || (bits & HdChangeTracker::DirtyTransform) != 0
+        || (bits & HdChangeTracker::DirtyPrimvar) != 0
+        || (bits & HdChangeTracker::DirtySubdivTags) != 0;
+    const bool materialDirty = (bits & HdChangeTracker::DirtyMaterialId) != 0;
+    const uint32_t maxSubdivLevel = shiroRenderParam->GetMaxSubdivLevel();
+
+    if (visibilityDirty && sceneDelegate && !sceneDelegate->GetVisible(GetId())) {
+        cachedPayload_.reset();
+        cachedMaterialId_.clear();
+        cachedMaxSubdivLevel_ = std::numeric_limits<uint32_t>::max();
+        shiroRenderParam->RemoveMesh(GetId().GetString());
+        *dirtyBits = HdChangeTracker::Clean;
+        return;
+    }
+
+    if (meshDirty || !cachedPayload_ || cachedMaxSubdivLevel_ != maxSubdivLevel) {
+        cachedPayload_ = HdShiroSceneBridge::ExtractMesh(sceneDelegate, GetId(), maxSubdivLevel);
+        if (!cachedPayload_) {
+            cachedMaterialId_.clear();
+            cachedMaxSubdivLevel_ = std::numeric_limits<uint32_t>::max();
+            shiroRenderParam->RemoveMesh(GetId().GetString());
+            *dirtyBits = HdChangeTracker::Clean;
+            return;
+        }
+        cachedMaxSubdivLevel_ = maxSubdivLevel;
+    }
+
+    if (meshDirty || materialDirty) {
+        const SdfPath materialId = sceneDelegate ? sceneDelegate->GetMaterialId(GetId()) : SdfPath();
+        cachedMaterialId_ = materialId.IsEmpty() ? std::string() : materialId.GetString();
+        shiroRenderParam->UpsertMesh(
+            GetId().GetString(),
+            cachedPayload_->mesh,
+            cachedPayload_->fallbackMaterial,
+            cachedMaterialId_);
     }
 
     *dirtyBits = HdChangeTracker::Clean;
@@ -35,6 +76,9 @@ void HdShiroMesh::Sync(
 
 void HdShiroMesh::Finalize(HdRenderParam* renderParam) {
     if (auto* shiroRenderParam = static_cast<HdShiroRenderParam*>(renderParam)) {
+        cachedPayload_.reset();
+        cachedMaterialId_.clear();
+        cachedMaxSubdivLevel_ = std::numeric_limits<uint32_t>::max();
         shiroRenderParam->RemoveMesh(GetId().GetString());
     }
 }
