@@ -4,6 +4,7 @@
 #include "shiro/render/OpenQmcSampler.h"
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
 #include <cmath>
 #include <limits>
@@ -18,12 +19,24 @@ namespace shiro::backend::cpu {
 
 using namespace shiro::render;
 
+struct EmissiveTriangleLight {
+    size_t meshIndex = 0;
+    uint32_t primitiveIndex = 0;
+    float area = 0.0f;
+    float selectionWeight = 0.0f;
+    float cumulativeWeight = 0.0f;
+    Vec3f radiance{};
+    Vec3f geometricNormal{};
+};
+
 struct AccelerationScene {
 #if SHIRO_HAVE_EMBREE
     RTCDevice device = nullptr;
     RTCScene scene = nullptr;
 #endif
     std::vector<size_t> meshIndicesByGeometry;
+    std::vector<EmissiveTriangleLight> emissiveTriangles;
+    float emissiveTriangleWeightSum = 0.0f;
 
     AccelerationScene() = default;
     AccelerationScene(const AccelerationScene&) = delete;
@@ -49,6 +62,26 @@ constexpr float kInvFourPi = 1.0f / (4.0f * kPi);
 constexpr float kRayEpsilon = 1.0e-4f;
 constexpr float kDirectSampleClamp = 24.0f;
 constexpr float kThroughputClamp = 12.0f;
+constexpr float kDeltaRoughnessThreshold = 0.02f;
+constexpr uint32_t kPathSampleDimensionStride = 12u;
+constexpr uint32_t kDirectLightingDimensionBase = 256u;
+constexpr uint32_t kDirectLightingDepthStride = 512u;
+constexpr uint32_t kDirectLightingLightStride = 128u;
+constexpr uint32_t kDirectLightingSampleStride = 2u;
+constexpr uint32_t kEmissiveDirectLightingDimensionBase = 8192u;
+constexpr uint32_t kEmissiveDirectLightingDepthStride = 8u;
+constexpr uint32_t kGuideThetaBins = 8u;
+constexpr uint32_t kGuidePhiBins = 16u;
+constexpr uint32_t kGuideBinCount = kGuideThetaBins * kGuidePhiBins;
+constexpr float kGuideMixWeight = 0.5f;
+constexpr float kGuideMinWeightSum = 1.0f;
+
+enum class BounceType {
+    None,
+    Diffuse,
+    Reflective,
+    Transmission,
+};
 
 bool IsCancelled(const std::atomic<bool>* cancel) {
     return cancel && cancel->load(std::memory_order_relaxed);
@@ -67,6 +100,8 @@ struct Hit {
     Vec3f position;
     Vec3f geometricNormal;
     Vec3f shadingNormal;
+    size_t meshIndex = std::numeric_limits<size_t>::max();
+    uint32_t primitiveIndex = std::numeric_limits<uint32_t>::max();
     uint32_t materialIndex = 0;
 };
 
@@ -75,6 +110,17 @@ struct SampleResult {
     Vec3f albedo{};
     Vec3f normal{};
     float depth = std::numeric_limits<float>::infinity();
+};
+
+struct GuideSnapshot {
+    std::array<float, kGuideBinCount> mass{};
+    std::array<float, kGuideBinCount> cdf{};
+    float totalWeight = 0.0f;
+};
+
+struct GuideRecord {
+    uint32_t binIndex = 0;
+    Vec3f throughput{};
 };
 
 Vec3f TriangleGeometricNormal(const TriangleMesh& mesh, uint32_t primitiveIndex) {
@@ -121,9 +167,110 @@ Vec3f TriangleShadingNormal(
     return TriangleGeometricNormal(mesh, primitiveIndex);
 }
 
+bool TriangleVertices(
+    const TriangleMesh& mesh,
+    uint32_t primitiveIndex,
+    Vec3f* p0,
+    Vec3f* p1,
+    Vec3f* p2) {
+    if (!p0 || !p1 || !p2) {
+        return false;
+    }
+
+    const size_t indexOffset = static_cast<size_t>(primitiveIndex) * 3u;
+    if (indexOffset + 2u >= mesh.indices.size()) {
+        return false;
+    }
+
+    const uint32_t i0 = mesh.indices[indexOffset + 0u];
+    const uint32_t i1 = mesh.indices[indexOffset + 1u];
+    const uint32_t i2 = mesh.indices[indexOffset + 2u];
+    if (i0 >= mesh.positions.size() || i1 >= mesh.positions.size() || i2 >= mesh.positions.size()) {
+        return false;
+    }
+
+    *p0 = mesh.positions[i0];
+    *p1 = mesh.positions[i1];
+    *p2 = mesh.positions[i2];
+    return true;
+}
+
+float TriangleArea(const TriangleMesh& mesh, uint32_t primitiveIndex, Vec3f* normal = nullptr) {
+    Vec3f p0{};
+    Vec3f p1{};
+    Vec3f p2{};
+    if (!TriangleVertices(mesh, primitiveIndex, &p0, &p1, &p2)) {
+        if (normal) {
+            *normal = {0.0f, 1.0f, 0.0f};
+        }
+        return 0.0f;
+    }
+
+    const Vec3f areaVector = Cross(p1 - p0, p2 - p0);
+    const float doubledArea = Length(areaVector);
+    if (doubledArea <= 1.0e-8f) {
+        if (normal) {
+            *normal = {0.0f, 1.0f, 0.0f};
+        }
+        return 0.0f;
+    }
+
+    if (normal) {
+        *normal = areaVector / doubledArea;
+    }
+    return doubledArea * 0.5f;
+}
+
+Vec3f TrianglePoint(
+    const TriangleMesh& mesh,
+    uint32_t primitiveIndex,
+    float barycentric0,
+    float barycentric1,
+    float barycentric2) {
+    Vec3f p0{};
+    Vec3f p1{};
+    Vec3f p2{};
+    if (!TriangleVertices(mesh, primitiveIndex, &p0, &p1, &p2)) {
+        return {};
+    }
+
+    return p0 * barycentric0 + p1 * barycentric1 + p2 * barycentric2;
+}
+
+void UniformTriangleBarycentrics(
+    const Vec2f& sample,
+    float* barycentric0,
+    float* barycentric1,
+    float* barycentric2) {
+    if (!barycentric0 || !barycentric1 || !barycentric2) {
+        return;
+    }
+
+    const float sqrtU = std::sqrt(Clamp(sample.x, 0.0f, 1.0f));
+    *barycentric0 = 1.0f - sqrtU;
+    *barycentric1 = Clamp(sample.y, 0.0f, 1.0f) * sqrtU;
+    *barycentric2 = 1.0f - *barycentric0 - *barycentric1;
+}
+
 Vec3f BuildOrthonormalX(const Vec3f& normal) {
     const Vec3f axis = std::fabs(normal.z) < 0.999f ? Vec3f{0.0f, 0.0f, 1.0f} : Vec3f{0.0f, 1.0f, 0.0f};
     return Normalize(Cross(axis, normal));
+}
+
+Vec3f WorldToLocal(const Vec3f& normal, const Vec3f& direction) {
+    const Vec3f tangent = BuildOrthonormalX(normal);
+    const Vec3f bitangent = Cross(normal, tangent);
+    return {
+        Dot(direction, tangent),
+        Dot(direction, bitangent),
+        Dot(direction, normal),
+    };
+}
+
+Vec3f LocalToWorld(const Vec3f& normal, const Vec3f& localDirection) {
+    const Vec3f tangent = BuildOrthonormalX(normal);
+    const Vec3f bitangent = Cross(normal, tangent);
+    return Normalize(tangent * localDirection.x + bitangent * localDirection.y + normal * localDirection.z);
 }
 
 Vec3f CosineSampleHemisphere(const Vec3f& normal, const Vec2f& sample) {
@@ -284,7 +431,8 @@ bool IntersectTriangle(
 bool IntersectSceneBruteForce(const Scene& scene, const Ray& ray, Hit* outHit) {
     Hit bestHit;
 
-    for (const TriangleMesh& mesh : scene.meshes) {
+    for (size_t meshIndex = 0; meshIndex < scene.meshes.size(); ++meshIndex) {
+        const TriangleMesh& mesh = scene.meshes[meshIndex];
         for (size_t index = 0; index + 2 < mesh.indices.size(); index += 3) {
             const Vec3f& p0 = mesh.positions[mesh.indices[index + 0]];
             const Vec3f& p1 = mesh.positions[mesh.indices[index + 1]];
@@ -303,6 +451,8 @@ bool IntersectSceneBruteForce(const Scene& scene, const Ray& ray, Hit* outHit) {
             bestHit.geometricNormal = Normalize(Cross(p1 - p0, p2 - p0));
             bestHit.shadingNormal =
                 TriangleShadingNormal(mesh, static_cast<uint32_t>(index / 3u), 1.0f - u - v, u, v);
+            bestHit.meshIndex = meshIndex;
+            bestHit.primitiveIndex = static_cast<uint32_t>(index / 3u);
             bestHit.materialIndex = mesh.materialIndex;
         }
     }
@@ -315,19 +465,63 @@ bool IntersectSceneBruteForce(const Scene& scene, const Ray& ray, Hit* outHit) {
     return true;
 }
 
-bool OccludedBruteForce(const Scene& scene, const Vec3f& origin, const Vec3f& direction) {
+bool OccludedBruteForce(const Scene& scene, const Vec3f& origin, const Vec3f& direction, float maxDistance) {
     Hit occlusionHit;
     Ray ray;
     ray.origin = origin;
     ray.direction = direction;
+    ray.tMax = maxDistance;
     return IntersectSceneBruteForce(scene, ray, &occlusionHit);
 }
 
-#if SHIRO_HAVE_EMBREE
 std::shared_ptr<const AccelerationScene> BuildAccelerationScene(
     const Scene& scene,
     const RenderSettings& settings) {
     auto acceleration = std::make_shared<AccelerationScene>();
+
+    for (size_t meshIndex = 0; meshIndex < scene.meshes.size(); ++meshIndex) {
+        const TriangleMesh& mesh = scene.meshes[meshIndex];
+        if (mesh.indices.size() < 3 || mesh.indices.size() % 3 != 0) {
+            continue;
+        }
+
+        const PbrMaterial material =
+            mesh.materialIndex < scene.materials.size() ? scene.materials[mesh.materialIndex] : PbrMaterial{};
+        const Vec3f radiance{
+            std::max(material.emissionColor.x * material.emissionStrength, 0.0f),
+            std::max(material.emissionColor.y * material.emissionStrength, 0.0f),
+            std::max(material.emissionColor.z * material.emissionStrength, 0.0f),
+        };
+        const float radianceWeight = std::max(
+            0.2126f * radiance.x + 0.7152f * radiance.y + 0.0722f * radiance.z,
+            0.0f);
+        if (radianceWeight <= 0.0f) {
+            continue;
+        }
+
+        const uint32_t primitiveCount = static_cast<uint32_t>(mesh.indices.size() / 3u);
+        for (uint32_t primitiveIndex = 0; primitiveIndex < primitiveCount; ++primitiveIndex) {
+            Vec3f geometricNormal{};
+            const float area = TriangleArea(mesh, primitiveIndex, &geometricNormal);
+            if (area <= 0.0f) {
+                continue;
+            }
+
+            const float selectionWeight = area * radianceWeight;
+            acceleration->emissiveTriangleWeightSum += selectionWeight;
+            acceleration->emissiveTriangles.push_back({
+                meshIndex,
+                primitiveIndex,
+                area,
+                selectionWeight,
+                acceleration->emissiveTriangleWeightSum,
+                radiance,
+                geometricNormal,
+            });
+        }
+    }
+
+#if SHIRO_HAVE_EMBREE
 
     std::string deviceConfig;
     if (settings.threadLimit > 0) {
@@ -336,12 +530,12 @@ std::shared_ptr<const AccelerationScene> BuildAccelerationScene(
 
     acceleration->device = rtcNewDevice(deviceConfig.empty() ? nullptr : deviceConfig.c_str());
     if (!acceleration->device) {
-        return nullptr;
+        return acceleration;
     }
 
     acceleration->scene = rtcNewScene(acceleration->device);
     if (!acceleration->scene) {
-        return nullptr;
+        return acceleration;
     }
 
     rtcSetSceneBuildQuality(acceleration->scene, RTC_BUILD_QUALITY_LOW);
@@ -391,12 +585,19 @@ std::shared_ptr<const AccelerationScene> BuildAccelerationScene(
 
     rtcCommitScene(acceleration->scene);
     if (rtcGetDeviceError(acceleration->device) != RTC_ERROR_NONE) {
-        return nullptr;
+        rtcReleaseScene(acceleration->scene);
+        acceleration->scene = nullptr;
+        rtcReleaseDevice(acceleration->device);
+        acceleration->device = nullptr;
     }
+#else
+    (void)settings;
+#endif
 
     return acceleration;
 }
 
+#if SHIRO_HAVE_EMBREE
 bool IntersectSceneEmbree(
     const Scene& scene,
     const AccelerationScene& acceleration,
@@ -448,6 +649,8 @@ bool IntersectSceneEmbree(
     if (Length(hit.shadingNormal) <= 0.0f) {
         hit.shadingNormal = hit.geometricNormal;
     }
+    hit.meshIndex = meshIndex;
+    hit.primitiveIndex = rayHit.hit.primID;
     hit.materialIndex = mesh.materialIndex;
     *outHit = hit;
     return true;
@@ -456,7 +659,8 @@ bool IntersectSceneEmbree(
 bool OccludedEmbree(
     const AccelerationScene& acceleration,
     const Vec3f& origin,
-    const Vec3f& direction) {
+    const Vec3f& direction,
+    float maxDistance) {
     RTCIntersectContext context;
     rtcInitIntersectContext(&context);
 
@@ -468,7 +672,7 @@ bool OccludedEmbree(
     ray.dir_y = direction.y;
     ray.dir_z = direction.z;
     ray.tnear = kRayEpsilon;
-    ray.tfar = FLT_MAX;
+    ray.tfar = maxDistance;
     ray.mask = 0xffffffffu;
     ray.flags = 0;
 
@@ -494,17 +698,139 @@ bool Occluded(
     const Scene& scene,
     const AccelerationScene* acceleration,
     const Vec3f& origin,
-    const Vec3f& direction) {
+    const Vec3f& direction,
+    float maxDistance = FLT_MAX) {
 #if SHIRO_HAVE_EMBREE
     if (acceleration && acceleration->scene) {
-        return OccludedEmbree(*acceleration, origin, direction);
+        return OccludedEmbree(*acceleration, origin, direction, maxDistance);
     }
 #endif
-    return OccludedBruteForce(scene, origin, direction);
+    return OccludedBruteForce(scene, origin, direction, maxDistance);
 }
 
 float Square(float value) {
     return value * value;
+}
+
+float Luminance(const Vec3f& value) {
+    return 0.2126f * value.x + 0.7152f * value.y + 0.0722f * value.z;
+}
+
+float GuideBinSolidAngle(uint32_t thetaIndex) {
+    const float theta0 = (static_cast<float>(thetaIndex) / static_cast<float>(kGuideThetaBins)) * (0.5f * kPi);
+    const float theta1 = (static_cast<float>(thetaIndex + 1u) / static_cast<float>(kGuideThetaBins)) * (0.5f * kPi);
+    const float phiExtent = (2.0f * kPi) / static_cast<float>(kGuidePhiBins);
+    return (std::cos(theta0) - std::cos(theta1)) * phiExtent;
+}
+
+uint32_t GuideBinIndex(const Vec3f& normal, const Vec3f& direction) {
+    const Vec3f local = WorldToLocal(normal, direction);
+    const float z = Clamp(local.z, 0.0f, 1.0f);
+    const float theta = std::acos(z);
+    float phi = std::atan2(local.y, local.x);
+    if (phi < 0.0f) {
+        phi += 2.0f * kPi;
+    }
+
+    const uint32_t thetaIndex =
+        std::min(kGuideThetaBins - 1u, static_cast<uint32_t>(theta / (0.5f * kPi) * static_cast<float>(kGuideThetaBins)));
+    const uint32_t phiIndex =
+        std::min(kGuidePhiBins - 1u, static_cast<uint32_t>(phi / (2.0f * kPi) * static_cast<float>(kGuidePhiBins)));
+    return thetaIndex * kGuidePhiBins + phiIndex;
+}
+
+GuideSnapshot BuildGuideSnapshot(const std::vector<float>& weights) {
+    GuideSnapshot snapshot;
+    if (weights.size() != kGuideBinCount) {
+        return snapshot;
+    }
+
+    float cumulative = 0.0f;
+    for (uint32_t binIndex = 0; binIndex < kGuideBinCount; ++binIndex) {
+        const float mass = std::max(weights[binIndex], 0.0f);
+        snapshot.mass[binIndex] = mass;
+        cumulative += mass;
+        snapshot.cdf[binIndex] = cumulative;
+    }
+    snapshot.totalWeight = cumulative;
+    return snapshot;
+}
+
+float GuidePdf(const GuideSnapshot& guide, const Vec3f& normal, const Vec3f& direction, uint32_t* outBinIndex = nullptr) {
+    if (guide.totalWeight <= kGuideMinWeightSum) {
+        if (outBinIndex) {
+            *outBinIndex = 0;
+        }
+        return 0.0f;
+    }
+
+    const uint32_t binIndex = GuideBinIndex(normal, direction);
+    if (outBinIndex) {
+        *outBinIndex = binIndex;
+    }
+    const uint32_t thetaIndex = binIndex / kGuidePhiBins;
+    const float mass = guide.mass[binIndex];
+    if (mass <= 0.0f) {
+        return 0.0f;
+    }
+    return (mass / guide.totalWeight) / std::max(GuideBinSolidAngle(thetaIndex), 1.0e-6f);
+}
+
+bool SampleGuideDirection(
+    const GuideSnapshot& guide,
+    const Vec3f& normal,
+    float selectionSample,
+    const Vec2f& shapeSample,
+    Vec3f* direction,
+    float* pdf,
+    uint32_t* outBinIndex = nullptr) {
+    if (!direction || !pdf || guide.totalWeight <= kGuideMinWeightSum) {
+        return false;
+    }
+
+    const float target = std::max(Clamp(selectionSample, 0.0f, 0.99999994f) * guide.totalWeight, 1.0e-6f);
+    const auto it = std::lower_bound(guide.cdf.begin(), guide.cdf.end(), target);
+    const uint32_t binIndex = it != guide.cdf.end()
+        ? static_cast<uint32_t>(std::distance(guide.cdf.begin(), it))
+        : (kGuideBinCount - 1u);
+    const uint32_t thetaIndex = binIndex / kGuidePhiBins;
+    const uint32_t phiIndex = binIndex % kGuidePhiBins;
+    const float theta0 = (static_cast<float>(thetaIndex) / static_cast<float>(kGuideThetaBins)) * (0.5f * kPi);
+    const float theta1 = (static_cast<float>(thetaIndex + 1u) / static_cast<float>(kGuideThetaBins)) * (0.5f * kPi);
+    const float cosTheta0 = std::cos(theta0);
+    const float cosTheta1 = std::cos(theta1);
+    const float cosTheta = cosTheta0 + (cosTheta1 - cosTheta0) * Clamp(shapeSample.x, 0.0f, 1.0f);
+    const float sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
+    const float phi0 = (static_cast<float>(phiIndex) / static_cast<float>(kGuidePhiBins)) * (2.0f * kPi);
+    const float phiExtent = (2.0f * kPi) / static_cast<float>(kGuidePhiBins);
+    const float phi = phi0 + Clamp(shapeSample.y, 0.0f, 1.0f) * phiExtent;
+    const Vec3f localDirection{
+        std::cos(phi) * sinTheta,
+        std::sin(phi) * sinTheta,
+        cosTheta,
+    };
+    *direction = LocalToWorld(normal, localDirection);
+    *pdf = (guide.mass[binIndex] / guide.totalWeight) / std::max(GuideBinSolidAngle(thetaIndex), 1.0e-6f);
+    if (outBinIndex) {
+        *outBinIndex = binIndex;
+    }
+    return true;
+}
+
+void AccumulateGuideContribution(
+    const std::vector<GuideRecord>& records,
+    const Vec3f& deltaRadiance,
+    std::array<float, kGuideBinCount>* guideUpdates) {
+    if (!guideUpdates) {
+        return;
+    }
+
+    for (const GuideRecord& record : records) {
+        if (record.binIndex >= kGuideBinCount) {
+            continue;
+        }
+        (*guideUpdates)[record.binIndex] += std::max(0.0f, Luminance(record.throughput * deltaRadiance));
+    }
 }
 
 Vec3f SafeNormalized(const Vec3f& value, const Vec3f& fallback) {
@@ -682,6 +1008,30 @@ Vec3f FresnelSchlick(const Vec3f& f0, float vDotH) {
     return f0 + (Vec3f{1.0f, 1.0f, 1.0f} - f0) * factor;
 }
 
+float FresnelDielectric(float cosThetaI, float etaI, float etaT) {
+    float clampedCosThetaI = Clamp(cosThetaI, -1.0f, 1.0f);
+    float incidentEta = std::max(etaI, 1.0e-6f);
+    float transmittedEta = std::max(etaT, 1.0e-6f);
+
+    if (clampedCosThetaI <= 0.0f) {
+        std::swap(incidentEta, transmittedEta);
+        clampedCosThetaI = std::fabs(clampedCosThetaI);
+    }
+
+    const float sinThetaI = std::sqrt(std::max(0.0f, 1.0f - clampedCosThetaI * clampedCosThetaI));
+    const float sinThetaT = incidentEta / transmittedEta * sinThetaI;
+    if (sinThetaT >= 1.0f) {
+        return 1.0f;
+    }
+
+    const float cosThetaT = std::sqrt(std::max(0.0f, 1.0f - sinThetaT * sinThetaT));
+    const float rParallel = ((transmittedEta * clampedCosThetaI) - (incidentEta * cosThetaT))
+        / std::max((transmittedEta * clampedCosThetaI) + (incidentEta * cosThetaT), 1.0e-6f);
+    const float rPerpendicular = ((incidentEta * clampedCosThetaI) - (transmittedEta * cosThetaT))
+        / std::max((incidentEta * clampedCosThetaI) + (transmittedEta * cosThetaT), 1.0e-6f);
+    return 0.5f * (rParallel * rParallel + rPerpendicular * rPerpendicular);
+}
+
 Vec3f OneMinusClamped(const Vec3f& value) {
     return {
         Clamp(1.0f - value.x, 0.0f, 1.0f),
@@ -781,7 +1131,7 @@ float EvaluateSpecularPdf(
     return GgxDistribution(nDotH, roughness) * nDotH / std::max(4.0f * vDotH, 1.0e-6f);
 }
 
-Vec3f TransmissionTint(const PbrMaterial& material);
+Vec3f TransmissionSurfaceTint(const PbrMaterial& material);
 
 Vec3f EvaluateTransmissionLobe(
     const PbrMaterial& material,
@@ -789,7 +1139,8 @@ Vec3f EvaluateTransmissionLobe(
     const Vec3f& coatNormal,
     const Vec3f& viewDirection,
     const Vec3f& lightDirection,
-    float eta,
+    float etaI,
+    float etaT,
     float roughness) {
     const float cosWo = Dot(normal, viewDirection);
     const float cosWi = Dot(normal, lightDirection);
@@ -799,7 +1150,8 @@ Vec3f EvaluateTransmissionLobe(
         return {};
     }
 
-    Vec3f halfVector = SafeNormalized(viewDirection + lightDirection * eta, normal);
+    const float relativeEta = etaT / std::max(etaI, 1.0e-6f);
+    Vec3f halfVector = SafeNormalized(viewDirection + lightDirection * relativeEta, normal);
     if (Dot(normal, halfVector) < 0.0f) {
         halfVector = halfVector * -1.0f;
     }
@@ -811,22 +1163,22 @@ Vec3f EvaluateTransmissionLobe(
     }
 
     const float nDotH = Clamp(Dot(normal, halfVector), 0.0f, 1.0f);
-    const float sqrtDenom = woDotH + eta * wiDotH;
+    const float sqrtDenom = woDotH + relativeEta * wiDotH;
     if (nDotH <= 0.0f || std::fabs(sqrtDenom) <= 1.0e-6f) {
         return {};
     }
 
     const float distribution = GgxDistribution(nDotH, roughness);
     const float visibility = GgxSmithVisibility(absCosWo, absCosWi, roughness);
-    const Vec3f fresnel =
-        OneMinusClamped(FresnelSchlick(SpecularF0(material), Clamp(std::fabs(woDotH), 0.0f, 1.0f)));
-    const Vec3f transmissionScale = TransmissionTint(material)
+    const float fresnel = 1.0f - FresnelDielectric(std::fabs(woDotH), etaI, etaT);
+    const Vec3f transmissionScale = TransmissionSurfaceTint(material)
         * CoatTransmissionScale(material, coatNormal, viewDirection, lightDirection)
         * (Clamp(material.transmission, 0.0f, 1.0f) * (1.0f - Clamp(material.metallic, 0.0f, 1.0f)));
     const float factor = std::fabs(
         distribution * visibility * std::fabs(wiDotH) * std::fabs(woDotH)
         / std::max(absCosWo * absCosWi * Square(sqrtDenom), 1.0e-6f));
-    return transmissionScale * fresnel * factor;
+    const float transportScale = 1.0f / std::max(relativeEta * relativeEta, 1.0e-6f);
+    return transmissionScale * fresnel * (factor * transportScale);
 }
 
 float EvaluateTransmissionPdf(
@@ -1045,33 +1397,115 @@ float TransmissionSampleWeight(const PbrMaterial& material) {
 
     const Vec3f underCoat = CoatUnderlayerTint(material) * OneMinusClamped(CoatF0(material));
     const Vec3f underBase = OneMinusClamped(SpecularF0(material));
-    return std::max(0.0f, MaxComponent(TransmissionTint(material) * underCoat * underBase))
+    const Vec3f transmissionTint = Clamp(material.transmissionColor, 0.0f, 1.0f);
+    return std::max(0.0f, MaxComponent(transmissionTint * underCoat * underBase))
         * transmission * (1.0f - metallic);
 }
 
-Vec3f TransmissionTint(const PbrMaterial& material) {
-    const float dispersion = Clamp(material.transmissionDispersion, 0.0f, 1.0f);
-    return {
-        material.transmissionColor.x * (1.0f + 0.15f * dispersion),
-        material.transmissionColor.y,
-        material.transmissionColor.z * (1.0f + 0.15f * (1.0f - dispersion)),
-    };
+Vec3f TransmissionSurfaceTint(const PbrMaterial& material) {
+    if (!material.thinWalled && material.transmissionDepth > 0.0f) {
+        return {1.0f, 1.0f, 1.0f};
+    }
+    return Clamp(material.transmissionColor, 0.0f, 1.0f);
+}
+
+float ThinWalledPaneTransmittance(float interfaceReflectance) {
+    const float clampedReflectance = Clamp(interfaceReflectance, 0.0f, 1.0f);
+    return Clamp(
+        (1.0f - clampedReflectance) / std::max(1.0f + clampedReflectance, 1.0e-6f),
+        0.0f,
+        1.0f);
 }
 
 Vec3f MediumExtinction(const PbrMaterial& material) {
-    const float depth = std::max(material.transmissionDepth, 1.0e-3f);
-    const Vec3f tint = Clamp(material.transmissionColor, 0.0f, 1.0f);
-    const Vec3f scatter = Clamp(material.transmissionScatter, 0.0f, 1.0f);
-    const float scatterScale = 1.0f - 0.35f * Clamp(material.transmissionScatterAnisotropy, -0.95f, 0.95f);
-    return {
-        (1.0f - tint.x + scatter.x * scatterScale) / depth,
-        (1.0f - tint.y + scatter.y * scatterScale) / depth,
-        (1.0f - tint.z + scatter.z * scatterScale) / depth,
+    Vec3f extinction{
+        std::max(material.transmissionScatter.x, 0.0f),
+        std::max(material.transmissionScatter.y, 0.0f),
+        std::max(material.transmissionScatter.z, 0.0f),
     };
+
+    if (material.thinWalled || material.transmissionDepth <= 0.0f) {
+        return extinction;
+    }
+
+    const float depth = std::max(material.transmissionDepth, 1.0e-3f);
+    const Vec3f tint = Clamp(material.transmissionColor, 1.0e-4f, 1.0f);
+    extinction.x += -std::log(tint.x) / depth;
+    extinction.y += -std::log(tint.y) / depth;
+    extinction.z += -std::log(tint.z) / depth;
+    return extinction;
 }
 
 Vec3f MediumAttenuation(const Vec3f& extinction, float distance) {
     return Exp({-extinction.x * distance, -extinction.y * distance, -extinction.z * distance});
+}
+
+const EmissiveTriangleLight* SampleEmissiveTriangleLight(const AccelerationScene& acceleration, float sample) {
+    if (acceleration.emissiveTriangles.empty() || acceleration.emissiveTriangleWeightSum <= 0.0f) {
+        return nullptr;
+    }
+
+    const float target = Clamp(sample, 0.0f, 0.99999994f) * acceleration.emissiveTriangleWeightSum;
+    const auto it = std::lower_bound(
+        acceleration.emissiveTriangles.begin(),
+        acceleration.emissiveTriangles.end(),
+        target,
+        [](const EmissiveTriangleLight& light, float weight) { return light.cumulativeWeight < weight; });
+    if (it == acceleration.emissiveTriangles.end()) {
+        return &acceleration.emissiveTriangles.back();
+    }
+    return &*it;
+}
+
+const EmissiveTriangleLight* FindEmissiveTriangleLight(
+    const AccelerationScene& acceleration,
+    size_t meshIndex,
+    uint32_t primitiveIndex) {
+    const auto it = std::find_if(
+        acceleration.emissiveTriangles.begin(),
+        acceleration.emissiveTriangles.end(),
+        [&](const EmissiveTriangleLight& light) {
+            return light.meshIndex == meshIndex && light.primitiveIndex == primitiveIndex;
+        });
+    return it != acceleration.emissiveTriangles.end() ? &*it : nullptr;
+}
+
+float EmissiveTrianglePdf(
+    const AccelerationScene& acceleration,
+    size_t meshIndex,
+    uint32_t primitiveIndex,
+    const Vec3f& origin,
+    const Vec3f& position) {
+    const EmissiveTriangleLight* light = FindEmissiveTriangleLight(acceleration, meshIndex, primitiveIndex);
+    if (!light || light->area <= 0.0f || acceleration.emissiveTriangleWeightSum <= 0.0f) {
+        return 0.0f;
+    }
+
+    const Vec3f toLight = position - origin;
+    const float distanceSquared = Dot(toLight, toLight);
+    if (distanceSquared <= 1.0e-10f) {
+        return 0.0f;
+    }
+
+    const Vec3f lightDirection = Normalize(toLight);
+    const float lightCosine = std::max(std::fabs(Dot(light->geometricNormal, lightDirection * -1.0f)), 1.0e-6f);
+    const float selectionProbability = light->selectionWeight / acceleration.emissiveTriangleWeightSum;
+    const float areaPdf = selectionProbability / light->area;
+    return areaPdf * distanceSquared / lightCosine;
+}
+
+float EnvironmentLightPdfSquaredSum(const Scene& scene, const Vec3f& direction) {
+    float pdfSquaredSum = 0.0f;
+    for (const DomeLight& light : scene.domeLights) {
+        const float lightPdf = EvaluateDomeLightPdf(light, direction);
+        pdfSquaredSum += lightPdf * lightPdf;
+    }
+    return pdfSquaredSum;
+}
+
+float PowerHeuristicOneVsMany(float bsdfPdf, float lightPdfSquaredSum) {
+    const float bsdfSquared = bsdfPdf * bsdfPdf;
+    return bsdfSquared / std::max(bsdfSquared + lightPdfSquaredSum, 1.0e-6f);
 }
 
 Vec3f DirectLighting(
@@ -1114,7 +1548,11 @@ Vec3f DirectLighting(
             Vec3f lightDirection{};
             Vec3f lightRadiance{};
             float lightPdf = 0.0f;
-            const Vec2f lightSample = sampler->Next2D(64u + depth * 16u + static_cast<uint32_t>(lightIndex) * 4u + sampleIndex);
+            const uint32_t dimension = kDirectLightingDimensionBase
+                + depth * kDirectLightingDepthStride
+                + static_cast<uint32_t>(lightIndex) * kDirectLightingLightStride
+                + sampleIndex * kDirectLightingSampleStride;
+            const Vec2f lightSample = sampler->Next2D(dimension);
             if (!SampleDomeLight(light, lightSample, &lightDirection, &lightRadiance, &lightPdf) || lightPdf <= 0.0f) {
                 continue;
             }
@@ -1135,6 +1573,58 @@ Vec3f DirectLighting(
         }
 
         radiance = radiance + lightContribution / static_cast<float>(domeLightSamples);
+    }
+
+    if (acceleration && !acceleration->emissiveTriangles.empty() && acceleration->emissiveTriangleWeightSum > 0.0f) {
+        const uint32_t dimensionBase = kEmissiveDirectLightingDimensionBase + depth * kEmissiveDirectLightingDepthStride;
+        const EmissiveTriangleLight* light =
+            SampleEmissiveTriangleLight(*acceleration, sampler->Next1D(dimensionBase + 0u));
+        if (light
+            && !(light->meshIndex == hit.meshIndex && light->primitiveIndex == hit.primitiveIndex)
+            && light->meshIndex < scene.meshes.size()) {
+            const TriangleMesh& mesh = scene.meshes[light->meshIndex];
+            float barycentric0 = 0.0f;
+            float barycentric1 = 0.0f;
+            float barycentric2 = 0.0f;
+            UniformTriangleBarycentrics(
+                sampler->Next2D(dimensionBase + 1u),
+                &barycentric0,
+                &barycentric1,
+                &barycentric2);
+            const Vec3f lightPosition =
+                TrianglePoint(mesh, light->primitiveIndex, barycentric0, barycentric1, barycentric2);
+            const Vec3f toLight = lightPosition - hit.position;
+            const float distanceSquared = Dot(toLight, toLight);
+            if (distanceSquared > 1.0e-10f) {
+                const float distance = std::sqrt(distanceSquared);
+                const Vec3f lightDirection = toLight / distance;
+                const float nDotL = Clamp(Dot(shadingNormal, lightDirection), 0.0f, 1.0f);
+                const float lightCosine = std::fabs(Dot(light->geometricNormal, lightDirection * -1.0f));
+                if (nDotL > 0.0f
+                    && lightCosine > 0.0f
+                    && !Occluded(
+                        scene,
+                        acceleration,
+                        origin,
+                        lightDirection,
+                        std::max(distance - 2.0f * kRayEpsilon, kRayEpsilon))) {
+                    const float selectionProbability = light->selectionWeight / acceleration->emissiveTriangleWeightSum;
+                    const float lightPdfArea = selectionProbability / std::max(light->area, 1.0e-6f);
+                    const float lightPdf = lightPdfArea * distanceSquared / std::max(lightCosine, 1.0e-6f);
+                    if (lightPdf > 0.0f) {
+                        const float bsdfPdf =
+                            EvaluateBsdfPdf(material, shadingNormal, coatNormal, viewDirection, lightDirection);
+                        const float misWeight = PowerHeuristic(lightPdf, bsdfPdf);
+                        radiance = radiance
+                            + ClampMaxComponentValue(
+                                EvaluateBsdf(material, shadingNormal, coatNormal, viewDirection, lightDirection)
+                                    * light->radiance
+                                    * (nDotL * misWeight / lightPdf),
+                                kDirectSampleClamp);
+                    }
+                }
+            }
+        }
     }
 
     return radiance;
@@ -1162,24 +1652,42 @@ SampleResult TracePath(
     const AccelerationScene* acceleration,
     const RenderSettings& settings,
     const Ray& primaryRay,
-    OpenQmcSampler* sampler) {
+    OpenQmcSampler* sampler,
+    const GuideSnapshot* guide,
+    std::array<float, kGuideBinCount>* guideUpdates) {
     SampleResult result;
     Ray ray = primaryRay;
     Vec3f throughput{1.0f, 1.0f, 1.0f};
     uint32_t diffuseDepth = 0;
     uint32_t specularDepth = 0;
-    bool lastBounceSpecular = true;
+    BounceType previousBounceType = BounceType::None;
+    bool previousBounceDelta = true;
+    float previousBsdfPdf = 0.0f;
     bool insideMedium = false;
     bool mediumActive = false;
     Vec3f mediumExtinction{};
+    std::vector<GuideRecord> guideRecords;
+    guideRecords.reserve(settings.maxDepth);
 
     for (uint32_t depth = 0; depth < settings.maxDepth; ++depth) {
+        const uint32_t dimensionBase = depth * kPathSampleDimensionStride;
         Hit hit;
         if (!IntersectScene(scene, acceleration, ray, &hit)) {
-            if (scene.domeLights.empty() || depth == 0 || lastBounceSpecular) {
-                if (depth > 0 || settings.backgroundVisible) {
-                    result.radiance = result.radiance + throughput * EnvironmentRadiance(scene, ray.direction);
+            if (depth > 0 || settings.backgroundVisible) {
+                const Vec3f environmentRadiance = EnvironmentRadiance(scene, ray.direction);
+                Vec3f deltaRadiance{};
+                if (scene.domeLights.empty()
+                    || depth == 0
+                    || previousBounceDelta
+                    || previousBounceType == BounceType::Transmission) {
+                    deltaRadiance = throughput * environmentRadiance;
+                } else {
+                    const float misWeight =
+                        PowerHeuristicOneVsMany(previousBsdfPdf, EnvironmentLightPdfSquaredSum(scene, ray.direction));
+                    deltaRadiance = throughput * environmentRadiance * misWeight;
                 }
+                AccumulateGuideContribution(guideRecords, deltaRadiance, guideUpdates);
+                result.radiance = result.radiance + deltaRadiance;
             }
             break;
         }
@@ -1204,7 +1712,7 @@ SampleResult TracePath(
         const Vec3f viewDirection = ray.direction * -1.0f;
         const float opacity = Clamp(material.opacity, 0.0f, 1.0f);
         if (opacity < 0.999f) {
-            if (sampler->Next1D(depth * 8u + 0u) > opacity) {
+            if (sampler->Next1D(dimensionBase + 0u) > opacity) {
                 ray.origin = hit.position + ray.direction * kRayEpsilon;
                 continue;
             }
@@ -1217,40 +1725,73 @@ SampleResult TracePath(
             result.depth = hit.distance;
         }
 
-        if (material.emissionStrength > 0.0f && (depth == 0 || lastBounceSpecular)) {
-            result.radiance = result.radiance + throughput * material.emissionColor * material.emissionStrength;
+        if (material.emissionStrength > 0.0f) {
+            const Vec3f emittedRadiance{
+                std::max(material.emissionColor.x * material.emissionStrength, 0.0f),
+                std::max(material.emissionColor.y * material.emissionStrength, 0.0f),
+                std::max(material.emissionColor.z * material.emissionStrength, 0.0f),
+            };
+            Vec3f deltaRadiance{};
+            if (depth == 0
+                || previousBounceDelta
+                || previousBounceType == BounceType::Transmission
+                || !acceleration) {
+                deltaRadiance = throughput * emittedRadiance;
+            } else {
+                const float lightPdf =
+                    EmissiveTrianglePdf(*acceleration, hit.meshIndex, hit.primitiveIndex, ray.origin, hit.position);
+                const float misWeight = lightPdf > 0.0f ? PowerHeuristic(previousBsdfPdf, lightPdf) : 1.0f;
+                deltaRadiance = throughput * emittedRadiance * misWeight;
+            }
+            AccumulateGuideContribution(guideRecords, deltaRadiance, guideUpdates);
+            result.radiance = result.radiance + deltaRadiance;
         }
 
-        result.radiance = result.radiance
-            + throughput
-                * DirectLighting(
-                    scene,
-                    acceleration,
-                    settings,
-                    hit,
-                    shadingNormal,
-                    coatNormal,
-                    material,
-                    viewDirection,
-                    sampler,
-                    depth);
+        const Vec3f directLighting = throughput
+            * DirectLighting(
+                scene,
+                acceleration,
+                settings,
+                hit,
+                shadingNormal,
+                coatNormal,
+                material,
+                viewDirection,
+                sampler,
+                depth);
+        AccumulateGuideContribution(guideRecords, directLighting, guideUpdates);
+        result.radiance = result.radiance + directLighting;
 
         const float diffuseWeight = DiffuseSampleWeight(material);
-        const float baseSpecularWeight = BaseSpecularSampleWeight(material);
+        float baseSpecularWeight = BaseSpecularSampleWeight(material);
         const float coatWeight = CoatSampleWeight(material);
-        const float transmissionWeight = TransmissionSampleWeight(material);
+        const float rawTransmissionWeight = TransmissionSampleWeight(material);
+        float transmissionWeight = rawTransmissionWeight;
+        if (rawTransmissionWeight > 0.0f) {
+            const float etaI = insideMedium ? std::max(material.ior, 1.0f) : 1.0f;
+            const float etaT = insideMedium ? 1.0f : std::max(material.ior, 1.0f);
+            const float interfaceReflectance =
+                FresnelDielectric(std::fabs(Dot(geometricNormal, viewDirection)), etaI, etaT);
+            const float passthroughWeight = material.thinWalled
+                ? ThinWalledPaneTransmittance(interfaceReflectance)
+                : (1.0f - interfaceReflectance);
+            transmissionWeight = rawTransmissionWeight * passthroughWeight;
+            baseSpecularWeight += rawTransmissionWeight * (1.0f - passthroughWeight);
+        }
         const float reflectiveWeight = diffuseWeight + baseSpecularWeight + coatWeight;
         const float totalWeight = reflectiveWeight + transmissionWeight;
         if (totalWeight <= 0.0f) {
             break;
         }
 
-        const float lobeSelector = sampler->Next1D(depth * 8u + 1u) * totalWeight;
-        const Vec2f directionSample = sampler->Next2D(depth * 8u + 2u);
+        const float lobeSelector = sampler->Next1D(dimensionBase + 1u) * totalWeight;
+        const Vec2f directionSample = sampler->Next2D(dimensionBase + 2u);
 
         Vec3f nextDirection{};
         Vec3f bsdfValue{};
         float pdf = 1.0f;
+        BounceType bounceType = BounceType::Diffuse;
+        bool scatterWasDelta = false;
         bool chooseTransmission = false;
         bool chooseBaseSpecular = false;
         bool chooseCoat = false;
@@ -1272,6 +1813,7 @@ SampleResult TracePath(
                 break;
             }
             ++specularDepth;
+            bounceType = BounceType::Transmission;
 
             const float transmissionProbability = std::max(transmissionWeight / totalWeight, 1.0e-6f);
             const float transmissionRoughness = material.thinWalled
@@ -1282,37 +1824,84 @@ SampleResult TracePath(
                     material.specularRotation);
             if (material.thinWalled) {
                 nextDirection = ray.direction;
-                const Vec3f transmissionScale = TransmissionTint(material)
+                const float interfaceReflectance =
+                    FresnelDielectric(std::fabs(Dot(geometricNormal, viewDirection)), 1.0f, std::max(material.ior, 1.0f));
+                const float paneTransmittance = ThinWalledPaneTransmittance(interfaceReflectance);
+                const Vec3f transmissionScale = TransmissionSurfaceTint(material)
                     * CoatTransmissionScale(material, coatNormal, viewDirection, nextDirection)
                     * (Clamp(material.transmission, 0.0f, 1.0f) * (1.0f - Clamp(material.metallic, 0.0f, 1.0f)));
                 const float absCosTheta = std::max(std::fabs(Dot(geometricNormal, nextDirection)), 1.0e-4f);
-                bsdfValue = transmissionScale / absCosTheta;
+                bsdfValue = transmissionScale * paneTransmittance / absCosTheta;
                 pdf = transmissionProbability;
+                scatterWasDelta = true;
             } else {
-                const Vec3f microNormal = GgxSampleHalfVector(geometricNormal, directionSample, transmissionRoughness);
                 const float etaI = insideMedium ? std::max(material.ior, 1.0f) : 1.0f;
                 const float etaT = insideMedium ? 1.0f : std::max(material.ior, 1.0f);
                 const float etaRatio = etaI / etaT;
-                const float eta = etaT / etaI;
-                if (!RefractDirection(ray.direction, microNormal, etaRatio, &nextDirection)) {
-                    nextDirection = Normalize(Reflect(ray.direction, microNormal));
-                    if (reflectiveWeight <= 0.0f) {
-                        break;
+                const float relativeEta = etaT / std::max(etaI, 1.0f);
+                const float interfaceReflectance =
+                    FresnelDielectric(std::fabs(Dot(geometricNormal, viewDirection)), etaI, etaT);
+                const float materialTransmission =
+                    Clamp(material.transmission, 0.0f, 1.0f) * (1.0f - Clamp(material.metallic, 0.0f, 1.0f));
+
+                if (transmissionRoughness <= kDeltaRoughnessThreshold) {
+                    if (!RefractDirection(ray.direction, geometricNormal, etaRatio, &nextDirection)) {
+                        nextDirection = Normalize(Reflect(ray.direction, geometricNormal));
+                        if (reflectiveWeight <= 0.0f) {
+                            break;
+                        }
+                        bsdfValue = EvaluateBsdf(material, shadingNormal, coatNormal, viewDirection, nextDirection);
+                        pdf = std::max((reflectiveWeight / totalWeight)
+                                * EvaluateBsdfPdf(material, shadingNormal, coatNormal, viewDirection, nextDirection),
+                            1.0e-6f);
+                        bounceType = BounceType::Reflective;
+                        scatterWasDelta = true;
+                        chooseTransmission = false;
+                        chooseBaseSpecular = true;
+                    } else {
+                        const Vec3f transmissionScale = TransmissionSurfaceTint(material)
+                            * CoatTransmissionScale(material, coatNormal, viewDirection, nextDirection)
+                            * materialTransmission;
+                        const float absCosTheta = std::max(std::fabs(Dot(geometricNormal, nextDirection)), 1.0e-4f);
+                        const float transportScale = 1.0f / std::max(relativeEta * relativeEta, 1.0e-6f);
+                        bsdfValue = transmissionScale * (1.0f - interfaceReflectance) * transportScale / absCosTheta;
+                        pdf = transmissionProbability;
+                        insideMedium = !insideMedium;
+                        if (insideMedium) {
+                            mediumExtinction = MediumExtinction(material);
+                            mediumActive = material.transmissionDepth > 0.0f || MaxComponent(material.transmissionScatter) > 0.0f;
+                        } else {
+                            mediumActive = false;
+                        }
+                        scatterWasDelta = true;
                     }
-                    bsdfValue = EvaluateBsdf(material, shadingNormal, coatNormal, viewDirection, nextDirection);
-                    pdf = std::max((reflectiveWeight / totalWeight)
-                            * EvaluateBsdfPdf(material, shadingNormal, coatNormal, viewDirection, nextDirection),
-                        1.0e-6f);
-                    chooseTransmission = false;
-                    chooseBaseSpecular = true;
                 } else {
+                    Vec3f microNormal = GgxSampleHalfVector(geometricNormal, directionSample, transmissionRoughness);
+                    if (Dot(microNormal, viewDirection) < 0.0f) {
+                        microNormal = microNormal * -1.0f;
+                    }
+                    if (!RefractDirection(ray.direction, microNormal, etaRatio, &nextDirection)) {
+                        nextDirection = Normalize(Reflect(ray.direction, microNormal));
+                        if (reflectiveWeight <= 0.0f) {
+                            break;
+                        }
+                        bsdfValue = EvaluateBsdf(material, shadingNormal, coatNormal, viewDirection, nextDirection);
+                        pdf = std::max((reflectiveWeight / totalWeight)
+                                * EvaluateBsdfPdf(material, shadingNormal, coatNormal, viewDirection, nextDirection),
+                            1.0e-6f);
+                        bounceType = BounceType::Reflective;
+                        scatterWasDelta = false;
+                        chooseTransmission = false;
+                        chooseBaseSpecular = true;
+                    } else {
                     bsdfValue = EvaluateTransmissionLobe(
                         material,
                         geometricNormal,
                         coatNormal,
                         viewDirection,
                         nextDirection,
-                        eta,
+                        etaI,
+                        etaT,
                         transmissionRoughness);
                     pdf = std::max(
                         transmissionProbability
@@ -1320,7 +1909,7 @@ SampleResult TracePath(
                                 geometricNormal,
                                 viewDirection,
                                 nextDirection,
-                                eta,
+                                etaT / etaI,
                                 transmissionRoughness),
                         1.0e-6f);
                     insideMedium = !insideMedium;
@@ -1330,6 +1919,8 @@ SampleResult TracePath(
                     } else {
                         mediumActive = false;
                     }
+                    scatterWasDelta = transmissionRoughness <= kDeltaRoughnessThreshold;
+                    }
                 }
             }
         } else if (chooseBaseSpecular || chooseCoat) {
@@ -1337,6 +1928,7 @@ SampleResult TracePath(
                 break;
             }
             ++specularDepth;
+            bounceType = BounceType::Reflective;
             const Vec3f sampleNormal = chooseCoat ? coatNormal : shadingNormal;
             const float sampleRoughness = chooseCoat
                 ? AdjustedRoughness(material.coatRoughness, material.coatAnisotropy, material.coatRotation)
@@ -1352,17 +1944,47 @@ SampleResult TracePath(
                     * EvaluateBsdfPdf(material, shadingNormal, coatNormal, viewDirection, nextDirection),
                 1.0e-6f);
             bsdfValue = EvaluateBsdf(material, shadingNormal, coatNormal, viewDirection, nextDirection);
+            scatterWasDelta = sampleRoughness <= kDeltaRoughnessThreshold;
         } else {
             if (diffuseDepth >= settings.diffuseDepth) {
                 break;
             }
             ++diffuseDepth;
-            nextDirection = CosineSampleHemisphere(shadingNormal, directionSample);
+            uint32_t guideBinIndex = 0;
+            const bool canUseGuide = guide && guide->totalWeight > kGuideMinWeightSum;
+            float guidePdf = 0.0f;
+            const float cosineBranchProbability = canUseGuide ? (1.0f - kGuideMixWeight) : 1.0f;
+            const float guideBranchProbability = canUseGuide ? kGuideMixWeight : 0.0f;
+            const bool sampleGuide = canUseGuide && sampler->Next1D(dimensionBase + 5u) < guideBranchProbability;
+            if (sampleGuide
+                && !SampleGuideDirection(
+                    *guide,
+                    shadingNormal,
+                    sampler->Next1D(dimensionBase + 6u),
+                    sampler->Next2D(dimensionBase + 7u),
+                    &nextDirection,
+                    &guidePdf,
+                    &guideBinIndex)) {
+                nextDirection = CosineSampleHemisphere(shadingNormal, directionSample);
+                guidePdf = GuidePdf(*guide, shadingNormal, nextDirection, &guideBinIndex);
+            } else if (!sampleGuide) {
+                nextDirection = CosineSampleHemisphere(shadingNormal, directionSample);
+                if (canUseGuide) {
+                    guidePdf = GuidePdf(*guide, shadingNormal, nextDirection, &guideBinIndex);
+                }
+            }
+            const float cosinePdf = Clamp(Dot(shadingNormal, nextDirection), 0.0f, 1.0f) * kInvPi;
             pdf = std::max(
                 (reflectiveWeight / totalWeight)
-                    * EvaluateBsdfPdf(material, shadingNormal, coatNormal, viewDirection, nextDirection),
+                    * (cosineBranchProbability * cosinePdf + guideBranchProbability * guidePdf),
                 1.0e-6f);
             bsdfValue = EvaluateBsdf(material, shadingNormal, coatNormal, viewDirection, nextDirection);
+            const float previewCosTheta = Clamp(Dot(shadingNormal, nextDirection), 0.0f, 1.0f);
+            const Vec3f previewThroughput =
+                ClampMaxComponentValue(throughput * bsdfValue * (previewCosTheta / pdf), kThroughputClamp);
+            if (canUseGuide && guideUpdates) {
+                guideRecords.push_back({guideBinIndex, previewThroughput});
+            }
         }
 
         float cosTheta = chooseTransmission
@@ -1377,11 +1999,13 @@ SampleResult TracePath(
         const float originOffset = Dot(rayNormal, nextDirection) >= 0.0f ? 1.0f : -1.0f;
         ray.origin = hit.position + rayNormal * (kRayEpsilon * originOffset);
         ray.direction = nextDirection;
-        lastBounceSpecular = chooseBaseSpecular || chooseCoat || chooseTransmission;
+        previousBounceType = bounceType;
+        previousBounceDelta = scatterWasDelta;
+        previousBsdfPdf = pdf;
 
         if (depth >= 2) {
             const float continueProbability = Clamp(MaxComponent(throughput), 0.05f, 0.95f);
-            if (sampler->Next1D(depth * 8u + 3u) > continueProbability) {
+            if (sampler->Next1D(dimensionBase + 4u) > continueProbability) {
                 break;
             }
 
@@ -1411,11 +2035,7 @@ std::shared_ptr<const AccelerationScene> CpuPathTracer::GetAccelerationScene(
         return cachedAcceleration_;
     }
 
-#if SHIRO_HAVE_EMBREE
     cachedAcceleration_ = BuildAccelerationScene(scene, settings);
-#else
-    cachedAcceleration_.reset();
-#endif
     cachedAccelerationSource_ = &scene;
     return cachedAcceleration_;
 }
@@ -1431,6 +2051,15 @@ FrameBuffer CpuPathTracer::RenderSampleBatch(const RenderRequest& request) const
 
     const std::shared_ptr<const AccelerationScene> acceleration =
         GetAccelerationScene(request.scene, request.settings);
+    GuideSnapshot guideSnapshot;
+    {
+        std::scoped_lock lock(guideMutex_);
+        if (cachedGuideSource_ != &request.scene || request.sampleStart == 0u || guideWeights_.size() != kGuideBinCount) {
+            cachedGuideSource_ = &request.scene;
+            guideWeights_.assign(kGuideBinCount, 0.0f);
+        }
+        guideSnapshot = BuildGuideSnapshot(guideWeights_);
+    }
 
     const uint32_t hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
     const uint32_t threadCount = request.settings.threadLimit > 0
@@ -1439,11 +2068,17 @@ FrameBuffer CpuPathTracer::RenderSampleBatch(const RenderRequest& request) const
     const uint32_t rowsPerThread = std::max(1u, request.settings.height / threadCount);
     std::vector<std::thread> workers;
     workers.reserve(threadCount);
+    std::vector<std::array<float, kGuideBinCount>> threadGuideUpdates(threadCount);
+    for (auto& updates : threadGuideUpdates) {
+        updates.fill(0.0f);
+    }
 
-    auto renderRows = [&](uint32_t beginY, uint32_t endY) {
+    auto renderRows = [&](uint32_t workerIndex, uint32_t beginY, uint32_t endY) {
         if (IsCancelled(request.cancel)) {
             return;
         }
+
+        auto& localGuideUpdates = threadGuideUpdates[workerIndex];
 
         for (uint32_t y = beginY; y < endY; ++y) {
             if (IsCancelled(request.cancel)) {
@@ -1477,7 +2112,9 @@ FrameBuffer CpuPathTracer::RenderSampleBatch(const RenderRequest& request) const
                         acceleration.get(),
                         request.settings,
                         ray,
-                        &sampler);
+                        &sampler,
+                        &guideSnapshot,
+                        &localGuideUpdates);
 
                     beauty = beauty + Vec4f{
                         sample.radiance.x,
@@ -1511,11 +2148,22 @@ FrameBuffer CpuPathTracer::RenderSampleBatch(const RenderRequest& request) const
         const uint32_t endY = workerIndex + 1 == threadCount
             ? request.settings.height
             : std::min(request.settings.height, beginY + rowsPerThread);
-        workers.emplace_back(renderRows, beginY, endY);
+        workers.emplace_back(renderRows, workerIndex, beginY, endY);
     }
 
     for (std::thread& worker : workers) {
         worker.join();
+    }
+
+    {
+        std::scoped_lock lock(guideMutex_);
+        if (cachedGuideSource_ == &request.scene && guideWeights_.size() == kGuideBinCount) {
+            for (const auto& localUpdates : threadGuideUpdates) {
+                for (uint32_t binIndex = 0; binIndex < kGuideBinCount; ++binIndex) {
+                    guideWeights_[binIndex] += localUpdates[binIndex];
+                }
+            }
+        }
     }
 
     return frame;

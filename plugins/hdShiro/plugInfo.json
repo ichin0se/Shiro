@@ -7,8 +7,22 @@
             "bases": [
               "HdRendererPlugin"
             ],
-            "displayName": "Shiro",
-            "priority": 0
+            "displayName": "Shiro CPU",
+            "priority": 99
+          },
+          "HdShiroXpuRendererPlugin": {
+            "bases": [
+              "HdRendererPlugin"
+            ],
+            "displayName": "Shiro XPU",
+            "priority": 99
+          },
+          "HdShiroGpuRendererPlugin": {
+            "bases": [
+              "HdRendererPlugin"
+            ],
+            "displayName": "Shiro GPU",
+            "priority": 99
           }
         }
       },

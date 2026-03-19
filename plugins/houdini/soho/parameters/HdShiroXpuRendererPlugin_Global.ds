@@ -1,0 +1,284 @@
+#include "$HFS/houdini/soho/parameters/CommonMacros.ds"
+{
+    name        "shiro"
+    label       "Shiro"
+    parmtag     { spare_opfilter        "!!SHOP/PROPERTIES!!" }
+    parmtag     { spare_classtags       "render" }
+
+    group {
+        name "global"
+        label "Global"
+
+        groupcollapsible {
+            name "sampling"
+            label "Sampling"
+            grouptag { "group_default" "1" }
+
+            parm {
+                name    "xn__shirosamplesPerPixel_control_nmb"
+                label   "Pixel Samples"
+                type    string
+                default { "none" }
+                menujoin {
+                    [ "import loputils" ]
+                    [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+                    language python
+                }
+                parmtag { "sidefx::look" "icon" }
+            }
+            parm {
+                name    "xn__shirosamplesPerPixel_m8a"
+                label   "Pixel Samples"
+                type    int
+                size    1
+                default { 32 }
+                range   { 1! 8192 }
+                parmtag { "spare_category" "Sampling" }
+                parmtag { "uiscope" "viewport" }
+                parmtag { "usdvaluetype" "int" }
+                disablewhen R"({ xn__shirosamplesPerPixel_control_nmb == block } { xn__shirosamplesPerPixel_control_nmb == none })"
+            }
+
+            parm {
+                name    "xn__shirosamplesPerUpdate_control_9nb"
+                label   "Samples Per Update"
+                type    string
+                default { "none" }
+                menujoin {
+                    [ "import loputils" ]
+                    [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+                    language python
+                }
+                parmtag { "sidefx::look" "icon" }
+            }
+            parm {
+                name    "xn__shirosamplesPerUpdate_89a"
+                label   "Samples Per Update"
+                type    int
+                size    1
+                default { 1 }
+                range   { 1! 1024 }
+                parmtag { "spare_category" "Sampling" }
+                parmtag { "uiscope" "viewport" }
+                parmtag { "usdvaluetype" "int" }
+                disablewhen R"({ xn__shirosamplesPerUpdate_control_9nb == block } { xn__shirosamplesPerUpdate_control_9nb == none })"
+            }
+
+            parm {
+                name    "xn__shirodomeLightSamples_control_9nb"
+                label   "Dome Light Samples"
+                type    string
+                default { "none" }
+                menujoin {
+                    [ "import loputils" ]
+                    [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+                    language python
+                }
+                parmtag { "sidefx::look" "icon" }
+            }
+            parm {
+                name    "xn__shirodomeLightSamples_89a"
+                label   "Dome Light Samples"
+                type    int
+                size    1
+                default { 1 }
+                range   { 1! 64 }
+                parmtag { "spare_category" "Sampling" }
+                parmtag { "uiscope" "viewport" }
+                parmtag { "usdvaluetype" "int" }
+                disablewhen R"({ xn__shirodomeLightSamples_control_9nb == block } { xn__shirodomeLightSamples_control_9nb == none })"
+            }
+        }
+
+        groupcollapsible {
+            name "limits"
+            label "Limits"
+            grouptag { "group_default" "1" }
+
+            parm {
+                name    "xn__shiromaxDepth_control_89a"
+                label   "Max Path Depth"
+                type    string
+                default { "none" }
+                menujoin {
+                    [ "import loputils" ]
+                    [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+                    language python
+                }
+                parmtag { "sidefx::look" "icon" }
+            }
+            parm {
+                name    "xn__shiromaxDepth_7wa"
+                label   "Max Path Depth"
+                type    int
+                size    1
+                default { 4 }
+                range   { 1! 64 }
+                parmtag { "spare_category" "Limits" }
+                parmtag { "uiscope" "viewport" }
+                parmtag { "usdvaluetype" "int" }
+                disablewhen R"({ xn__shiromaxDepth_control_89a == block } { xn__shiromaxDepth_control_89a == none })"
+            }
+
+            parm {
+                name    "xn__shirodiffuseDepth_control_rhb"
+                label   "Diffuse Depth"
+                type    string
+                default { "none" }
+                menujoin {
+                    [ "import loputils" ]
+                    [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+                    language python
+                }
+                parmtag { "sidefx::look" "icon" }
+            }
+            parm {
+                name    "xn__shirodiffuseDepth_q3a"
+                label   "Diffuse Depth"
+                type    int
+                size    1
+                default { 2 }
+                range   { 0! 64 }
+                parmtag { "spare_category" "Limits" }
+                parmtag { "uiscope" "viewport" }
+                parmtag { "usdvaluetype" "int" }
+                disablewhen R"({ xn__shirodiffuseDepth_control_rhb == block } { xn__shirodiffuseDepth_control_rhb == none })"
+            }
+
+            parm {
+                name    "xn__shirospecularDepth_control_ejb"
+                label   "Specular Depth"
+                type    string
+                default { "none" }
+                menujoin {
+                    [ "import loputils" ]
+                    [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+                    language python
+                }
+                parmtag { "sidefx::look" "icon" }
+            }
+            parm {
+                name    "xn__shirospecularDepth_d5a"
+                label   "Specular Depth"
+                type    int
+                size    1
+                default { 2 }
+                range   { 0! 64 }
+                parmtag { "spare_category" "Limits" }
+                parmtag { "uiscope" "viewport" }
+                parmtag { "usdvaluetype" "int" }
+                disablewhen R"({ xn__shirospecularDepth_control_ejb == block } { xn__shirospecularDepth_control_ejb == none })"
+            }
+
+            parm {
+                name    "xn__shiromaxSubdivLevel_control_0kb"
+                label   "Max Subdivision Level"
+                type    string
+                default { "none" }
+                menujoin {
+                    [ "import loputils" ]
+                    [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+                    language python
+                }
+                parmtag { "sidefx::look" "icon" }
+            }
+            parm {
+                name    "xn__shiromaxSubdivLevel_z6a"
+                label   "Max Subdivision Level"
+                type    int
+                size    1
+                default { 2 }
+                range   { 0! 8 }
+                parmtag { "spare_category" "Limits" }
+                parmtag { "uiscope" "viewport" }
+                parmtag { "usdvaluetype" "int" }
+                disablewhen R"({ xn__shiromaxSubdivLevel_control_0kb == block } { xn__shiromaxSubdivLevel_control_0kb == none })"
+            }
+        }
+
+        groupcollapsible {
+            name "display"
+            label "Display"
+            grouptag { "group_default" "1" }
+
+            parm {
+                name    "xn__shirobackgroundVisible_control_wpb"
+                label   "Background Visible"
+                type    string
+                default { "none" }
+                menujoin {
+                    [ "import loputils" ]
+                    [ "return loputils.createEditPropertiesControlMenu(kwargs, 'bool')" ]
+                    language python
+                }
+                parmtag { "sidefx::look" "icon" }
+            }
+            parm {
+                name    "xn__shirobackgroundVisible_vcb"
+                label   "Background Visible"
+                type    toggle
+                size    1
+                default { 1 }
+                parmtag { "spare_category" "Display" }
+                parmtag { "uiscope" "viewport" }
+                parmtag { "usdvaluetype" "bool" }
+                disablewhen R"({ xn__shirobackgroundVisible_control_wpb == block } { xn__shirobackgroundVisible_control_wpb == none })"
+            }
+
+            parm {
+                name    "xn__shiroheadlightEnabled_control_9nb"
+                label   "Enable Headlight"
+                type    string
+                default { "none" }
+                menujoin {
+                    [ "import loputils" ]
+                    [ "return loputils.createEditPropertiesControlMenu(kwargs, 'bool')" ]
+                    language python
+                }
+                parmtag { "sidefx::look" "icon" }
+            }
+            parm {
+                name    "xn__shiroheadlightEnabled_89a"
+                label   "Enable Headlight"
+                type    toggle
+                size    1
+                default { 1 }
+                parmtag { "spare_category" "Display" }
+                parmtag { "uiscope" "viewport" }
+                parmtag { "usdvaluetype" "bool" }
+                disablewhen R"({ xn__shiroheadlightEnabled_control_9nb == block } { xn__shiroheadlightEnabled_control_9nb == none })"
+            }
+        }
+
+        groupcollapsible {
+            name "performance"
+            label "Performance"
+            grouptag { "group_default" "1" }
+
+            parm {
+                name    "xn__shirothreadLimit_control_4fb"
+                label   "Thread Limit"
+                type    string
+                default { "none" }
+                menujoin {
+                    [ "import loputils" ]
+                    [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+                    language python
+                }
+                parmtag { "sidefx::look" "icon" }
+            }
+            parm {
+                name    "xn__shirothreadLimit_31a"
+                label   "Thread Limit"
+                type    int
+                size    1
+                default { 0 }
+                range   { 0! 512 }
+                parmtag { "spare_category" "Performance" }
+                parmtag { "uiscope" "viewport" }
+                parmtag { "usdvaluetype" "int" }
+                disablewhen R"({ xn__shirothreadLimit_control_4fb == block } { xn__shirothreadLimit_control_4fb == none })"
+            }
+        }
+    }
+}

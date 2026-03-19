@@ -5,10 +5,13 @@
 #if SHIRO_WITH_USD
 
 #include <memory>
+#include <optional>
 
 #include <pxr/imaging/hd/instancer.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/resourceRegistry.h>
+
+#include "shiro/render/Renderer.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -16,8 +19,11 @@ class HdShiroRenderParam;
 
 class HdShiroRenderDelegate final : public HdRenderDelegate {
 public:
-    HdShiroRenderDelegate();
-    explicit HdShiroRenderDelegate(const HdRenderSettingsMap& settingsMap);
+    explicit HdShiroRenderDelegate(
+        std::optional<shiro::render::BackendKind> forcedBackend = std::nullopt);
+    HdShiroRenderDelegate(
+        const HdRenderSettingsMap& settingsMap,
+        std::optional<shiro::render::BackendKind> forcedBackend = std::nullopt);
     ~HdShiroRenderDelegate() override;
 
     const TfTokenVector& GetSupportedRprimTypes() const override;
@@ -52,6 +58,7 @@ public:
 private:
     void ApplySettingsMap(const HdRenderSettingsMap& settingsMap);
 
+    std::optional<shiro::render::BackendKind> forcedBackend_;
     std::unique_ptr<HdShiroRenderParam> renderParam_;
     HdResourceRegistrySharedPtr resourceRegistry_;
 };

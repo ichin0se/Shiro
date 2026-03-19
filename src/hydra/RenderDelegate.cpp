@@ -23,6 +23,19 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
 
+int ToBackendSettingValue(shiro::render::BackendKind backend) {
+    switch (backend) {
+    case shiro::render::BackendKind::Cpu:
+        return 0;
+    case shiro::render::BackendKind::Gpu:
+        return 1;
+    case shiro::render::BackendKind::Hybrid:
+        return 2;
+    }
+
+    return 0;
+}
+
 const TfTokenVector& SupportedRprimTypes() {
     static const TfTokenVector tokens = {HdPrimTypeTokens->mesh};
     return tokens;
@@ -59,16 +72,30 @@ const TfTokenVector& RenderSettingsNamespaces() {
 
 }  // namespace
 
-HdShiroRenderDelegate::HdShiroRenderDelegate()
+HdShiroRenderDelegate::HdShiroRenderDelegate(std::optional<shiro::render::BackendKind> forcedBackend)
     : HdRenderDelegate(),
+      forcedBackend_(forcedBackend),
       renderParam_(std::make_unique<HdShiroRenderParam>()),
       resourceRegistry_(std::make_shared<HdResourceRegistry>()) {
+    if (forcedBackend_) {
+        renderParam_->SetRenderSetting(
+            HdShiroTokens->namespacedBackend,
+            VtValue(ToBackendSettingValue(*forcedBackend_)));
+    }
 }
 
-HdShiroRenderDelegate::HdShiroRenderDelegate(const HdRenderSettingsMap& settingsMap)
+HdShiroRenderDelegate::HdShiroRenderDelegate(
+    const HdRenderSettingsMap& settingsMap,
+    std::optional<shiro::render::BackendKind> forcedBackend)
     : HdRenderDelegate(settingsMap),
+      forcedBackend_(forcedBackend),
       renderParam_(std::make_unique<HdShiroRenderParam>()),
       resourceRegistry_(std::make_shared<HdResourceRegistry>()) {
+    if (forcedBackend_) {
+        renderParam_->SetRenderSetting(
+            HdShiroTokens->namespacedBackend,
+            VtValue(ToBackendSettingValue(*forcedBackend_)));
+    }
     ApplySettingsMap(settingsMap);
 }
 
@@ -184,7 +211,6 @@ TfTokenVector HdShiroRenderDelegate::GetMaterialRenderContexts() const {
 
 HdRenderSettingDescriptorList HdShiroRenderDelegate::GetRenderSettingDescriptors() const {
     return {
-        {"Backend (0=CPU, 1=GPU, 2=Hybrid)", HdShiroTokens->namespacedBackend, VtValue(2)},
         {"Pixel Samples", HdShiroTokens->namespacedSamplesPerPixel, VtValue(32)},
         {"Samples Per Update", HdShiroTokens->namespacedSamplesPerUpdate, VtValue(1)},
         {"Dome Light Samples", HdShiroTokens->namespacedDomeLightSamples, VtValue(1)},
@@ -207,8 +233,14 @@ TfTokenVector HdShiroRenderDelegate::GetRenderSettingsNamespaces() const {
 }
 
 void HdShiroRenderDelegate::SetRenderSetting(const TfToken& key, const VtValue& value) {
-    HdRenderDelegate::SetRenderSetting(key, value);
-    renderParam_->SetRenderSetting(key, value);
+    VtValue effectiveValue = value;
+    if (forcedBackend_
+        && (key == HdShiroTokens->backend || key == HdShiroTokens->namespacedBackend)) {
+        effectiveValue = VtValue(ToBackendSettingValue(*forcedBackend_));
+    }
+
+    HdRenderDelegate::SetRenderSetting(key, effectiveValue);
+    renderParam_->SetRenderSetting(key, effectiveValue);
 }
 
 VtValue HdShiroRenderDelegate::GetRenderSetting(const TfToken& key) const {

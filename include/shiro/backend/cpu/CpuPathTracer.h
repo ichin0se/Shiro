@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <mutex>
+#include <vector>
 
 #include "shiro/backend/RenderBackend.h"
 
@@ -25,6 +26,9 @@ private:
     mutable std::mutex accelerationMutex_;
     mutable const render::Scene* cachedAccelerationSource_ = nullptr;
     mutable std::shared_ptr<const AccelerationScene> cachedAcceleration_;
+    mutable std::mutex guideMutex_;
+    mutable const render::Scene* cachedGuideSource_ = nullptr;
+    mutable std::vector<float> guideWeights_;
 };
 
 }  // namespace shiro::backend::cpu

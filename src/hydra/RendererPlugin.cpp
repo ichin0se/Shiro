@@ -10,31 +10,105 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-TF_REGISTRY_FUNCTION(TfType) {
-    HdRendererPluginRegistry::Define<HdShiroRendererPlugin>();
+namespace {
+
+HdRenderDelegate* CreateRenderDelegateForBackend(
+    std::optional<shiro::render::BackendKind> backend) {
+    return new HdShiroRenderDelegate(backend);
 }
 
-HdRenderDelegate* HdShiroRendererPlugin::CreateRenderDelegate() {
-    return new HdShiroRenderDelegate();
+HdRenderDelegate* CreateRenderDelegateForBackend(
+    const HdRenderSettingsMap& settingsMap,
+    std::optional<shiro::render::BackendKind> backend) {
+    return new HdShiroRenderDelegate(settingsMap, backend);
 }
 
-HdRenderDelegate* HdShiroRendererPlugin::CreateRenderDelegate(const HdRenderSettingsMap& settingsMap) {
-    return new HdShiroRenderDelegate(settingsMap);
-}
-
-void HdShiroRendererPlugin::DeleteRenderDelegate(HdRenderDelegate* renderDelegate) {
+void DeleteRenderDelegateInstance(HdRenderDelegate* renderDelegate) {
     delete renderDelegate;
 }
 
 #if PXR_VERSION >= 2511
-bool HdShiroRendererPlugin::IsSupported(const HdRendererCreateArgs& rendererCreateArgs, std::string* reasonWhyNot) const {
+bool IsBackendSelectionSupported(
+    const HdRendererCreateArgs& rendererCreateArgs,
+    std::string* reasonWhyNot) {
     (void)rendererCreateArgs;
     (void)reasonWhyNot;
 #else
-bool HdShiroRendererPlugin::IsSupported(bool gpuEnabled) const {
+bool IsBackendSelectionSupported(bool gpuEnabled) {
     (void)gpuEnabled;
 #endif
     return true;
+}
+
+}  // namespace
+
+TF_REGISTRY_FUNCTION(TfType) {
+    HdRendererPluginRegistry::Define<HdShiroRendererPlugin>();
+    HdRendererPluginRegistry::Define<HdShiroXpuRendererPlugin>();
+    HdRendererPluginRegistry::Define<HdShiroGpuRendererPlugin>();
+}
+
+HdRenderDelegate* HdShiroRendererPlugin::CreateRenderDelegate() {
+    return CreateRenderDelegateForBackend(shiro::render::BackendKind::Cpu);
+}
+
+HdRenderDelegate* HdShiroRendererPlugin::CreateRenderDelegate(const HdRenderSettingsMap& settingsMap) {
+    return CreateRenderDelegateForBackend(settingsMap, shiro::render::BackendKind::Cpu);
+}
+
+void HdShiroRendererPlugin::DeleteRenderDelegate(HdRenderDelegate* renderDelegate) {
+    DeleteRenderDelegateInstance(renderDelegate);
+}
+
+#if PXR_VERSION >= 2511
+bool HdShiroRendererPlugin::IsSupported(const HdRendererCreateArgs& rendererCreateArgs, std::string* reasonWhyNot) const {
+    return IsBackendSelectionSupported(rendererCreateArgs, reasonWhyNot);
+#else
+bool HdShiroRendererPlugin::IsSupported(bool gpuEnabled) const {
+    return IsBackendSelectionSupported(gpuEnabled);
+#endif
+}
+
+HdRenderDelegate* HdShiroXpuRendererPlugin::CreateRenderDelegate() {
+    return CreateRenderDelegateForBackend(shiro::render::BackendKind::Hybrid);
+}
+
+HdRenderDelegate* HdShiroXpuRendererPlugin::CreateRenderDelegate(const HdRenderSettingsMap& settingsMap) {
+    return CreateRenderDelegateForBackend(settingsMap, shiro::render::BackendKind::Hybrid);
+}
+
+void HdShiroXpuRendererPlugin::DeleteRenderDelegate(HdRenderDelegate* renderDelegate) {
+    DeleteRenderDelegateInstance(renderDelegate);
+}
+
+#if PXR_VERSION >= 2511
+bool HdShiroXpuRendererPlugin::IsSupported(const HdRendererCreateArgs& rendererCreateArgs, std::string* reasonWhyNot) const {
+    return IsBackendSelectionSupported(rendererCreateArgs, reasonWhyNot);
+#else
+bool HdShiroXpuRendererPlugin::IsSupported(bool gpuEnabled) const {
+    return IsBackendSelectionSupported(gpuEnabled);
+#endif
+}
+
+HdRenderDelegate* HdShiroGpuRendererPlugin::CreateRenderDelegate() {
+    return CreateRenderDelegateForBackend(shiro::render::BackendKind::Gpu);
+}
+
+HdRenderDelegate* HdShiroGpuRendererPlugin::CreateRenderDelegate(const HdRenderSettingsMap& settingsMap) {
+    return CreateRenderDelegateForBackend(settingsMap, shiro::render::BackendKind::Gpu);
+}
+
+void HdShiroGpuRendererPlugin::DeleteRenderDelegate(HdRenderDelegate* renderDelegate) {
+    DeleteRenderDelegateInstance(renderDelegate);
+}
+
+#if PXR_VERSION >= 2511
+bool HdShiroGpuRendererPlugin::IsSupported(const HdRendererCreateArgs& rendererCreateArgs, std::string* reasonWhyNot) const {
+    return IsBackendSelectionSupported(rendererCreateArgs, reasonWhyNot);
+#else
+bool HdShiroGpuRendererPlugin::IsSupported(bool gpuEnabled) const {
+    return IsBackendSelectionSupported(gpuEnabled);
+#endif
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

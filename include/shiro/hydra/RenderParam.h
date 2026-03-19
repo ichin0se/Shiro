@@ -4,6 +4,7 @@
 
 #if SHIRO_WITH_USD
 
+#include <chrono>
 #include <atomic>
 #include <condition_variable>
 #include <memory>
@@ -12,6 +13,7 @@
 #include <thread>
 #include <unordered_map>
 
+#include <pxr/base/vt/dictionary.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 
 #include "shiro/render/Renderer.h"
@@ -45,6 +47,7 @@ public:
     void RequestRender(const shiro::render::Camera& camera);
     bool GetLatestFrame(shiro::render::FrameBuffer* frame, bool* converged) const;
     bool IsConverged() const;
+    VtDictionary GetRenderStats() const;
     const shiro::render::RenderSettings& Settings() const { return settings_; }
     uint32_t GetMaxSubdivLevel() const;
 
@@ -85,12 +88,16 @@ private:
     uint64_t requestedSerial_ = 0;
     uint64_t completedSerial_ = 0;
     uint32_t accumulatedSamples_ = 0;
+    uint32_t activeSampleStart_ = 0;
+    uint32_t activeSampleCount_ = 0;
     bool hasPendingCamera_ = false;
     bool hasFrame_ = false;
     bool renderInProgress_ = false;
     bool stopWorker_ = false;
     bool paused_ = false;
     bool sceneCacheDirty_ = true;
+    bool hasRenderStartTime_ = false;
+    std::chrono::steady_clock::time_point renderStartTime_{};
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

@@ -238,7 +238,6 @@ def Scope "Render"
         bool disableMotionBlur = true
         token[] includedPurposes = ["default", "render"]
 
-        int shiro:backend = 2
         int shiro:samplesPerPixel = 256
         int shiro:samplesPerUpdate = 8
         int shiro:domeLightSamples = 4

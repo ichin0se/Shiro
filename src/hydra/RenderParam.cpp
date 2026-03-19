@@ -207,7 +207,7 @@ std::string EnvironmentCacheKey(const shiro::render::DomeLight& light) {
 }  // namespace
 
 HdShiroRenderParam::HdShiroRenderParam() {
-    settings_.backend = shiro::render::BackendKind::Hybrid;
+    settings_.backend = shiro::render::BackendKind::Cpu;
     settings_.samplesPerPixel = 32;
     settings_.samplesPerUpdate = 1;
     settings_.domeLightSamples = 1;

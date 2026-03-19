@@ -1,8 +1,6 @@
 {
-  "HdShiroRendererPlugin": {
+  "HdShiro_base": {
     "valid": true,
-    "menulabel": "Shiro",
-    "menupriority": 20,
     "allowbackgroundupdate": false,
     "depthstyle": "linear",
     "defaultpurposes": [
@@ -17,5 +15,23 @@
     ],
     "aovsupport": true,
     "viewportrenderer": true
+  },
+  "HdShiroRendererPlugin": {
+    "inherit_from": "HdShiro_base",
+    "menulabel": "Shiro CPU",
+    "menupriority": 22,
+    "valid": true
+  },
+  "HdShiroXpuRendererPlugin": {
+    "inherit_from": "HdShiro_base",
+    "menulabel": "Shiro XPU",
+    "menupriority": 21,
+    "valid": true
+  },
+  "HdShiroGpuRendererPlugin": {
+    "inherit_from": "HdShiro_base",
+    "menulabel": "Shiro GPU",
+    "menupriority": 20,
+    "valid": true
   }
 }
