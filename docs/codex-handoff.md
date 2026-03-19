@@ -1316,3 +1316,319 @@ Practical implication:
   driver absence
 - retest the probe after reclaiming GPU memory before making further OptiX
   architecture changes
+
+## Solaris renderer-menu backend variants (2026-03-18)
+
+User request for this phase:
+
+- keep a single `hdShiro` plugin library
+- expose separate Solaris renderer choices for:
+  - Shiro CPU
+  - Shiro XPU
+  - Shiro GPU
+
+Implemented frontend change:
+
+- `plugins/hdShiro/plugInfo.json` now registers three `HdRendererPlugin` types
+  from the same shared library:
+  - `HdShiroRendererPlugin`
+  - `HdShiroXpuRendererPlugin`
+  - `HdShiroGpuRendererPlugin`
+- `plugins/UsdRenderers.json` now publishes three Solaris menu entries with a
+  shared base config and distinct labels:
+  - `Shiro CPU`
+  - `Shiro XPU`
+  - `Shiro GPU`
+
+Behavior decision:
+
+- `HdShiroRendererPlugin` is now explicitly the CPU variant for backward
+  compatibility with existing `usdview` / `husk -R HdShiroRendererPlugin`
+  commands
+- backend selection in Houdini is expected to happen through the renderer menu
+  entry first, not through a visible `shiro:backend` UI control
+- `HdShiroRenderDelegate` now accepts an optional forced backend and pins the
+  selected variant inside the delegate
+- if a stage already authors `shiro:backend`, that value no longer silently
+  overrides the chosen renderer variant during delegate setup
+
+Related cleanup:
+
+- the delegate no longer advertises `shiro:backend` as a standard renderer UI
+  descriptor
+- several example test scenes no longer author `shiro:backend = 2`, so they
+  remain compatible with whichever of the three renderer variants is selected
+
+Current semantic note:
+
+- `Shiro XPU` still maps to Shiro's current `Hybrid` backend enum
+- this does not mean a finished production hybrid scheduler exists yet
+- today it is primarily the forward-looking backend-selection surface for the
+  evolving CPU/GPU combined path
+
+### 21. Solaris node wrappers for Shiro render settings/products/AOVs
+
+Problem:
+- viewport/global DS files exposed `shiro:*` renderer parameters, but Solaris
+  still had no Shiro-branded LOP node set comparable to Karma/Arnold/RenderMan
+- users had to build Shiro render settings manually from generic
+  `rendersettings` / `renderproduct` / `rendervar` nodes
+
+Implementation:
+- added `plugins/houdini/otls/generate_shiro_lops.py`
+- CMake now generates `ShiroLops.hda` with Houdini `hython` during the frontend
+  build when the USD provider is Houdini
+- the generated HDA library is staged and installed to `otls/`
+- current generated node set:
+  - `shiro::1.0`
+  - `shirorenderproperties::1.0`
+  - `shirorenderproducts::1.0`
+  - `shirostandardrendervars::1.0`
+  - `shiroadditionalrendervars::1.0`
+
+Design:
+- `shiro` and `shirorenderproperties` are thin wrappers over generic
+  `rendersettings`
+- `shirorenderproducts` is a thin wrapper over generic `renderproduct`
+- `shiroadditionalrendervars` is a thin wrapper over generic
+  `additionalrendervars`
+- wrappers clone the native LOP parm UI onto the outer asset and drive the
+  internal node through channel references, so Houdini's stock parameter
+  behavior is preserved as much as possible
+- `shirostandardrendervars` is a dedicated subnet asset that authors four Shiro
+  AOVs:
+  - beauty (`color`, `color4f`, image channel `rgba`)
+  - albedo (`albedo`, `color3f`)
+  - normal (`normal`, `normal3f`)
+  - depth (`depth`, `float`)
+
+Default authored prims:
+- render settings: `/Render/Settings/Shiro`
+- render product: `/Render/Products/ShiroBeauty`
+- standard render vars parent: `/Render/Products/Vars`
+
+Notes:
+- the local machine used for implementation had Karma and Redshift Solaris
+  plugins available, but not Arnold or RenderMan Solaris operator types
+- node breakdown and parameter grouping were therefore aligned primarily to
+  Karma's shipped node split, while keeping the wrappers generic and
+  renderer-style specific where possible
+- `shirostandardrendervars` originally failed to author stage data because the
+  inner `rendervar` `primpath` parms evaluated empty inside the HDA when using
+  string expressions that concatenated `chs("../parentprimpath")`
+- this was fixed by switching the generated `primpath` expressions to Python
+  expressions that explicitly query the parent asset node via `hou.node("..")`
+- the HDA build command now forces `PYTHONNOUSERSITE=1`; otherwise some
+  machines may import a user-site `pxr` package before Houdini's bundled USD
+  modules and fail during `loputils` import
+
+### 22. CPU emissive-light NEE and MIS cleanup (2026-03-19)
+
+Problem:
+- current images still showed especially slow convergence in diffuse shadow
+  regions
+- the CPU integrator only treated distant lights and dome lights as explicit
+  light-sampling targets
+- emissive geometry contributed only when a path happened to hit it, which is
+  a major variance source for emissive area lighting and secondary GI
+
+Implementation in `src/backend/cpu/CpuPathTracer.cpp`:
+- added emissive triangle extraction during acceleration-scene build
+- each emissive triangle stores:
+  - triangle index
+  - emitting surface area
+  - emitted radiance
+  - scalar importance weight derived from area and luminance
+- added weighted random sampling for emissive triangles in direct lighting
+- added explicit emissive-light pdf evaluation so BSDF sampling and light
+  sampling can be combined with MIS
+- added finite-distance visibility tests for shadow segments instead of only
+  using infinite shadow rays
+- added MIS weighting for:
+  - environment hits reached by BSDF continuation
+  - emissive hits reached by BSDF continuation
+
+Integrator behavior after this change:
+- direct lighting now consists of:
+  - deterministic evaluation of distant lights
+  - sampled dome/environment lighting
+  - sampled emissive triangle lighting
+- emissive mesh lighting is no longer "hit by luck only"
+- diffuse and GI paths should converge faster in scenes lit by emissive panels,
+  glowing meshes, or small bright emitters
+- environment/emissive contributions are less prone to double counting because
+  escape/hit contributions now include MIS against the continuation pdf when
+  appropriate
+
+Important implementation detail:
+- emissive-light preprocessing now lives in the same acceleration-scene cache
+  path as the CPU BVH setup
+- during this work, `GetAccelerationScene()` was corrected so the non-Embree
+  path no longer drops the built acceleration data on the floor; this matters
+  because the emissive sampler state is stored there
+
+Validation performed:
+- `cmake --build build-linux-houdini20.5 --target hdShiro -j4`
+- `cmake --build build-linux-houdini20.5-cuda --target hdShiro -j4`
+- both builds succeeded
+
+Runtime status:
+- short `husk` smoke runs for `standard_surface_full.usda` and
+  `sphere_material_dome.usda` reached plugin load / render startup but timed
+  out before completing an image
+- no final convergence measurement was captured yet, so this remains a
+  code-level and startup-level validation, not a finished image-quality signoff
+
+Scope / limitations:
+- this is still a unidirectional path tracer
+- no BDPT, VCM, photon mapping, manifold NEE, MLT, or ReSTIR-class light
+  transport algorithm exists yet
+- caustics therefore still rely on ordinary path tracing rather than a
+  dedicated caustics solver
+
+### 23. Solid transmission / Fresnel / refraction corrections (2026-03-19)
+
+Problem:
+- reports for transparent / semi-transparent objects indicated that solid
+  transmission was visibly wrong
+- observed symptoms included:
+  - background showing through where a refracted grid/scene should dominate
+  - overly white transmission
+  - weak or absent refraction
+  - missing or implausible specular highlight behavior on glass-like materials
+
+Scene interpretation note:
+- one debug scene that looked suspicious at first,
+  `testscenes/standard_surface_grid.usda`, intentionally authors
+  `inputs:thin_walled = true` on its thin glass material
+- that file is therefore not a valid "must show solid refraction" reference
+- the solid transmission reference for this work is
+  `testscenes/transmission_debug.usda`, where the glass sphere authors
+  `thin_walled = false`
+
+Material ingestion status:
+- `SceneBridge.cpp` already propagated `thin_walled` correctly for Standard
+  Surface and OpenPBR pathways
+- no major parsing bug was found for the solid transmission test path; the
+  main problems were in the CPU BTDF / transport implementation
+
+Implementation in `src/backend/cpu/CpuPathTracer.cpp`:
+- rough/smooth transmission throughput now applies the radiance-transport
+  asymmetry term based on relative eta (`eta^2` transport scaling)
+- near-specular transmission (`roughness <= kDeltaRoughnessThreshold`) now
+  bypasses the GGX transmission path and uses exact smooth dielectric
+  refraction
+- the exact refraction branch:
+  - computes Fresnel reflectance at the interface
+  - computes the refracted direction analytically
+  - applies transmission throughput with the correct transport scaling
+- the microfacet transmission path also received normal-orientation cleanup so
+  the micro normal faces the incoming view consistently before refraction math
+
+Expected result:
+- solid glass should no longer wash out as pure white nearly as easily
+- refracted background detail should be stronger and more directionally
+  correct
+- specular reflection vs transmission energy split should follow Fresnel more
+  plausibly
+
+Validation performed:
+- `cmake --build build-linux-houdini20.5 --target hdShiro -j4`
+- `cmake --build build-linux-houdini20.5-cuda --target hdShiro -j4`
+- both builds succeeded after the transmission fixes
+
+Runtime status:
+- a reduced `transmission_debug` `husk` run was attempted through a temporary
+  low-resolution USDA, but it timed out before a final image was written
+- this work therefore still needs a real visual signoff inside Houdini/Solaris
+  or a longer-running `husk` session
+
+Known limitations:
+- this work targeted solid transmission, not thin-walled sheet transmission
+- spectral dispersion is still not implemented as a real spectral transport
+  effect in the CPU backend
+- there is still no dedicated caustics algorithm, so strong refractive
+  caustics will remain weak/noisy
+
+### 24. First-stage diffuse path guiding (2026-03-19)
+
+User goal for this phase:
+- start introducing path guiding to improve convergence, especially for noisy
+  diffuse GI driven by environment and emissive lighting
+
+Implemented design:
+- added a minimal first-stage guiding system to the CPU backend
+- this is not a full production path guiding architecture; it is a global
+  directional guide with progressive learning
+
+Files:
+- `include/shiro/backend/cpu/CpuPathTracer.h`
+- `src/backend/cpu/CpuPathTracer.cpp`
+
+Guide model:
+- a scene-global directional histogram stored in tangent-space bins
+- persistent across progressive render batches
+- reset when the scene changes or when rendering restarts from sample 0
+- protected by a mutex and merged from per-thread local accumulators after each
+  batch
+
+Where the guide is used:
+- only for diffuse continuation sampling
+- diffuse continuation now samples from a mixture of:
+  - cosine-weighted hemisphere sampling
+  - guide-driven directional sampling
+- the guide mixture weight is currently fixed in code (`kGuideMixWeight = 0.5`)
+
+How the guide learns:
+- during path tracing, later radiance contributions from direct lighting,
+  emissive hits, and environment escapes are traced back into the previously
+  selected diffuse guide bin
+- those contributions accumulate directional weights
+- at the end of the batch, thread-local guide buffers are merged into the
+  persistent guide state
+- the next batch snapshots that guide and uses it for new diffuse samples
+
+Practical expectation:
+- scenes whose indirect diffuse transport is dominated by a few bright
+  directions (HDRI sun regions, emissive panels, small bright sources) should
+  converge faster than with pure cosine continuation
+- this is primarily a variance-reduction step for diffuse GI; it is not a full
+  lighting cache or reuse framework
+
+Important limitations:
+- not spatially varying; one global guide is shared across the scene
+- not used for glossy or specular continuation
+- not a caustics/path-reuse system
+- guide updates are intentionally lightweight and therefore heuristic rather
+  than a rigorous final-path-guiding formulation
+- the current implementation should be treated as a first practical step, not
+  as the finished architecture
+
+Validation performed:
+- `cmake --build build-linux-houdini20.5 --target hdShiro -j4`
+- `cmake --build build-linux-houdini20.5-cuda --target hdShiro -j4`
+- both builds succeeded after the guiding changes
+
+Runtime status:
+- no controlled A/B render benchmark has been captured yet
+- expected next validation is:
+  - compare fixed-spp renders before/after on an emissive-light scene
+  - compare fixed-time renders before/after on a dome-lit diffuse scene
+  - record whether the guide introduces bias or directional artifacts
+
+### 25. Open items after the 2026-03-19 CPU work
+
+Still needed:
+- visual signoff for the new solid transmission path in Solaris/usdview/husk
+- real before/after convergence measurements for emissive NEE and diffuse path
+  guiding
+- a decision on whether to keep evolving the current global guide or replace it
+  with a spatially varying guide data structure
+- explicit documentation or UI controls if/when guide parameters become
+  artist-exposed
+
+Partially started but not finished:
+- Hydra viewport render-stats / percent-complete reporting
+- some scaffolding was started in `RenderParam`, but there is not yet a full
+  `GetRenderStats()` path through the delegate and no confirmed Houdini HUD
+  integration comparable to Karma's viewport percentage display
